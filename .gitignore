@@ -1,0 +1,12 @@
+.idea
+data
+dev
+log
+logs
+cert
+bin
+script
+build
+*.log
+*.toml
+build.sh
