@@ -10,8 +10,6 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrWeakPassword       = errors.New("password must be at least 8 characters")
-	ErrInvalidAlgorithm   = errors.New("invalid algorithm")
-	ErrInvalidKeyType     = errors.New("invalid key type for algorithm")
 )
 
 // JWT-specific errors
@@ -22,9 +20,6 @@ var (
 	ErrTokenInvalidSignature  = errors.New("token: invalid signature")
 	ErrTokenAlgorithmMismatch = errors.New("token: algorithm mismatch")
 	ErrTokenMissingClaim      = errors.New("token: missing required claim")
-	ErrTokenInvalidHeader     = errors.New("token: invalid header encoding")
-	ErrTokenInvalidClaims     = errors.New("token: invalid claims encoding")
-	ErrTokenInvalidJSON       = errors.New("token: malformed JSON")
 	ErrTokenEmptyUserID       = errors.New("token: empty user ID")
 	ErrTokenNoPrivateKey      = errors.New("token: private key required for signing")
 	ErrTokenNoPublicKey       = errors.New("token: public key required for verification")

@@ -143,6 +143,10 @@ func DeriveCredential(username, password string, salt []byte, time, memory uint3
 		return nil, ErrSCRAMSaltTooShort
 	}
 
+	if time == 0 || memory == 0 || threads == 0 {
+		return nil, ErrSCRAMZeroParams
+	}
+
 	// Derive salted password using Argon2id
 	saltedPassword := argon2.IDKey([]byte(password), salt, time, memory, threads, DefaultArgonKeyLen)
 
