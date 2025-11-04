@@ -143,3 +143,75 @@ func MigrateFromPHC(username, password, phcHash string) (*Credential, error) {
 
 	return DeriveCredential(username, password, salt, time, memory, threads)
 }
+
+// ValidatePHCHashFormat checks if a hash string has a valid and complete
+// PHC format for Argon2id. It validates structure, parameters, and encoding,
+// but does not verify a password against the hash.
+func ValidatePHCHashFormat(phcHash string) error {
+	parts := strings.Split(phcHash, "$")
+	if len(parts) != 6 {
+		return fmt.Errorf("%w: expected 6 parts, got %d", ErrPHCInvalidFormat, len(parts))
+	}
+
+	// Validate empty parts[0] (PHC format starts with $)
+	if parts[0] != "" {
+		return fmt.Errorf("%w: hash must start with $", ErrPHCInvalidFormat)
+	}
+
+	// Validate algorithm identifier
+	if parts[1] != "argon2id" {
+		return fmt.Errorf("%w: unsupported algorithm %q, expected argon2id", ErrPHCInvalidFormat, parts[1])
+	}
+
+	// Validate version
+	var version int
+	n, err := fmt.Sscanf(parts[2], "v=%d", &version)
+	if err != nil || n != 1 {
+		return fmt.Errorf("%w: invalid version format", ErrPHCInvalidFormat)
+	}
+	if version != argon2.Version {
+		return fmt.Errorf("%w: unsupported version %d, expected %d", ErrPHCInvalidFormat, version, argon2.Version)
+	}
+
+	// Validate parameters
+	var memory, time uint32
+	var threads uint8
+	n, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads)
+	if err != nil || n != 3 {
+		return fmt.Errorf("%w: failed to parse parameters", ErrPHCInvalidFormat)
+	}
+
+	// Validate parameter ranges
+	if time == 0 || memory == 0 || threads == 0 {
+		return fmt.Errorf("%w: parameters must be non-zero", ErrPHCInvalidFormat)
+	}
+	if memory > 4*1024*1024 { // 4GB limit
+		return fmt.Errorf("%w: memory parameter exceeds maximum (4GB)", ErrPHCInvalidFormat)
+	}
+	if time > 1000 { // Reasonable upper bound
+		return fmt.Errorf("%w: time parameter exceeds maximum (1000)", ErrPHCInvalidFormat)
+	}
+	if threads > 255 { // uint8 max, but practically much lower
+		return fmt.Errorf("%w: threads parameter exceeds maximum (255)", ErrPHCInvalidFormat)
+	}
+
+	// Validate salt encoding
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPHCInvalidSalt, err)
+	}
+	if len(salt) < 8 { // Minimum safe salt length
+		return fmt.Errorf("%w: salt too short (%d bytes)", ErrPHCInvalidSalt, len(salt))
+	}
+
+	// Validate hash encoding
+	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPHCInvalidHash, err)
+	}
+	if len(hash) < 16 { // Minimum hash length
+		return fmt.Errorf("%w: hash too short (%d bytes)", ErrPHCInvalidHash, len(hash))
+	}
+
+	return nil
+}
