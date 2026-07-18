@@ -154,11 +154,17 @@ func ImportCredential(data map[string]any) (*Credential, error) {
 	if argonTime == 0 || argonMemory == 0 || argonThreads == 0 {
 		return nil, ErrSCRAMZeroParams
 	}
+	if err := checkArgonCost(argonMemory, argonTime, argonThreads); err != nil {
+		return nil, ErrSCRAMParamsTooLarge
+	}
 	if len(salt) < 16 {
 		return nil, ErrSCRAMSaltTooShort
 	}
-	if len(storedKey) != sha256.Size || len(serverKey) != sha256.Size {
+	if len(storedKey) != sha256.Size {
 		return nil, ErrCredInvalidStoredKey
+	}
+	if len(serverKey) != sha256.Size {
+		return nil, ErrCredInvalidServerKey
 	}
 
 	return &Credential{
@@ -405,7 +411,8 @@ func (s *ScramServer) ProcessClientFinalMessage(fullNonce, clientProof string) (
 	if len(clientProofBytes) != len(clientSignature) {
 		return ServerFinalMessage{}, ErrSCRAMInvalidProofLen
 	}
-	clientKey := xorBytes(clientProofBytes, clientSignature)
+	clientKey := make([]byte, len(clientProofBytes))
+	subtle.XORBytes(clientKey, clientProofBytes, clientSignature)
 
 	// Verify by computing StoredKey
 	computedStoredKey := sha256.Sum256(clientKey)
@@ -491,6 +498,11 @@ func (c *ScramClient) ProcessServerFirstMessage(msg ServerFirstMessage) (ClientF
 	if msg.ArgonTime == 0 || msg.ArgonMemory == 0 || msg.ArgonThreads == 0 {
 		return ClientFinalRequest{}, ErrSCRAMZeroParams
 	}
+	// The peer chooses these values. Unbounded, they are a remote OOM
+	// against every client that talks to a hostile or compromised server.
+	if err := checkArgonCost(msg.ArgonMemory, msg.ArgonTime, msg.ArgonThreads); err != nil {
+		return ClientFinalRequest{}, ErrSCRAMParamsTooLarge
+	}
 
 	// Derive keys using Argon2id
 	saltedPassword := argon2.IDKey([]byte(c.Password), salt, msg.ArgonTime, msg.ArgonMemory, msg.ArgonThreads, 32)
@@ -506,7 +518,8 @@ func (c *ScramClient) ProcessServerFirstMessage(msg ServerFirstMessage) (ClientF
 
 	// Compute client proof
 	clientSignature := computeHMAC(storedKey[:], []byte(c.authMessage))
-	clientProof := xorBytes(clientKey, clientSignature)
+	clientProof := make([]byte, len(clientKey))
+	subtle.XORBytes(clientProof, clientKey, clientSignature)
 
 	// Store server key for verification
 	c.serverKey = serverKey
@@ -588,15 +601,4 @@ func computeHMAC(key, message []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(message)
 	return mac.Sum(nil)
-}
-
-func xorBytes(a, b []byte) []byte {
-	if len(a) != len(b) {
-		panic("xor length mismatch")
-	}
-	result := make([]byte, len(a))
-	for i := range a {
-		result[i] = a[i] ^ b[i]
-	}
-	return result
 }

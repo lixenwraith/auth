@@ -42,6 +42,7 @@ var (
 	ErrPHCInvalidFormat = errors.New("phc: invalid format")
 	ErrPHCInvalidSalt   = errors.New("phc: invalid salt encoding")
 	ErrPHCInvalidHash   = errors.New("phc: invalid hash encoding")
+	ErrPHCCostTooHigh   = errors.New("phc: cost parameters exceed verification limit")
 )
 
 // SCRAM-specific errors
@@ -57,6 +58,7 @@ var (
 	ErrSCRAMZeroParams        = errors.New("scram: invalid Argon2 parameters")
 	ErrSCRAMSaltTooShort      = errors.New("scram: salt must be at least 16 bytes")
 	ErrSCRAMTooManyHandshakes = errors.New("scram: handshake capacity exceeded")
+	ErrSCRAMParamsTooLarge    = errors.New("scram: Argon2 parameters exceed limit")
 )
 
 // Credential import/export errors

@@ -53,5 +53,14 @@ server.AddCredential(cred)
 ## Testing
 
 ```bash
-go test -v ./
+go test ./... -race -count=1
+go test ./... -run '^$' -bench . -benchmem
+
+# fuzz targets (run individually)
+go test -run '^$' -fuzz FuzzParsePHC -fuzztime 60s
+go test -run '^$' -fuzz FuzzVerifyPassword -fuzztime 60s
+go test -run '^$' -fuzz FuzzImportCredential -fuzztime 60s
+go test -run '^$' -fuzz FuzzValidateHS256Token -fuzztime 60s
+go test -run '^$' -fuzz FuzzParseBasicAuth -fuzztime 30s
 ```
+

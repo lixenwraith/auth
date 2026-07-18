@@ -111,6 +111,16 @@ func NewJWTRSA(privateKey *rsa.PrivateKey, opts ...JWTOption) (*JWT, error) {
 	return j, nil
 }
 
+// NewJWTRSAFromPEM creates a JWT manager for RS256 from raw PEM-encoded private key data.
+func NewJWTRSAFromPEM(privateKeyPEM []byte, opts ...JWTOption) (*JWT, error) {
+	privateKey, err := parseRSAPrivateKey(privateKeyPEM)
+	if err != nil {
+		return nil, err
+	}
+	// Call the original constructor with the now-parsed key
+	return NewJWTRSA(privateKey, opts...)
+}
+
 // NewJWTVerifier creates JWT manager for verification only (RS256)
 func NewJWTVerifier(publicKey *rsa.PublicKey, opts ...JWTOption) (*JWT, error) {
 	if publicKey == nil {
@@ -130,6 +140,16 @@ func NewJWTVerifier(publicKey *rsa.PublicKey, opts ...JWTOption) (*JWT, error) {
 	}
 
 	return j, nil
+}
+
+// NewJWTVerifierFromPEM creates a JWT manager for verification from raw PEM-encoded public key data.
+func NewJWTVerifierFromPEM(publicKeyPEM []byte, opts ...JWTOption) (*JWT, error) {
+	publicKey, err := parseRSAPublicKey(publicKeyPEM)
+	if err != nil {
+		return nil, err
+	}
+	// Call the original constructor with the now-parsed key
+	return NewJWTVerifier(publicKey, opts...)
 }
 
 // GenerateToken creates signed JWT with claims
@@ -191,26 +211,25 @@ func (j *JWT) ValidateToken(tokenString string) (string, map[string]any, error) 
 func mapJWTError(err error) error {
 	switch {
 	case errors.Is(err, jwt.ErrTokenMalformed):
-		return fmt.Errorf("%w : %w", ErrTokenMalformed, err)
+		return fmt.Errorf("%w: %w", ErrTokenMalformed, err)
 	case errors.Is(err, jwt.ErrTokenUnverifiable):
-		return fmt.Errorf("%w : %w", ErrTokenMalformed, err)
+		return fmt.Errorf("%w: %w", ErrTokenMalformed, err)
 	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
-		return fmt.Errorf("%w : %w", ErrTokenInvalidSignature, err)
+		return fmt.Errorf("%w: %w", ErrTokenInvalidSignature, err)
 	case errors.Is(err, jwt.ErrTokenExpired):
-		return fmt.Errorf("%w : %w", ErrTokenExpired, err)
+		return fmt.Errorf("%w: %w", ErrTokenExpired, err)
 	case errors.Is(err, jwt.ErrTokenNotValidYet):
-		return fmt.Errorf("%w : %w", ErrTokenNotYetValid, err)
+		return fmt.Errorf("%w: %w", ErrTokenNotYetValid, err)
 	case errors.Is(err, jwt.ErrTokenInvalidAudience):
-		return fmt.Errorf("%w : %w", ErrTokenMissingClaim, err)
+		return fmt.Errorf("%w: %w", ErrTokenMissingClaim, err)
 	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
-		return fmt.Errorf("%w : %w", ErrTokenMissingClaim, err)
+		return fmt.Errorf("%w: %w", ErrTokenMissingClaim, err)
+	case errors.Is(err, jwt.ErrTokenRequiredClaimMissing):
+		return fmt.Errorf("%w: %w", ErrTokenMissingClaim, err)
 	default:
-		// Alg rejection (WithValidMethods) surfaces as ErrTokenSignatureInvalid.
-		return fmt.Errorf("%w : %w", ErrTokenMalformed, err)
+		return fmt.Errorf("%w: %w", ErrTokenMalformed, err)
 	}
 }
-
-// Standalone helper functions for one-off operations
 
 // GenerateHS256Token creates HS256 JWT without manager instance
 func GenerateHS256Token(secret []byte, userID string, claims map[string]any, lifetime time.Duration) (string, error) {
@@ -261,28 +280,6 @@ func ValidateHS256Token(secret []byte, tokenString string) (string, map[string]a
 	}
 
 	return claims.Subject, claims.Extra, nil
-}
-
-// RSA Utilities
-
-// NewJWTRSAFromPEM creates a JWT manager for RS256 from raw PEM-encoded private key data.
-func NewJWTRSAFromPEM(privateKeyPEM []byte, opts ...JWTOption) (*JWT, error) {
-	privateKey, err := parseRSAPrivateKey(privateKeyPEM)
-	if err != nil {
-		return nil, err
-	}
-	// Call the original constructor with the now-parsed key
-	return NewJWTRSA(privateKey, opts...)
-}
-
-// NewJWTVerifierFromPEM creates a JWT manager for verification from raw PEM-encoded public key data.
-func NewJWTVerifierFromPEM(publicKeyPEM []byte, opts ...JWTOption) (*JWT, error) {
-	publicKey, err := parseRSAPublicKey(publicKeyPEM)
-	if err != nil {
-		return nil, err
-	}
-	// Call the original constructor with the now-parsed key
-	return NewJWTVerifier(publicKey, opts...)
 }
 
 // parseRSAPrivateKey parses a PEM-encoded RSA private key.
