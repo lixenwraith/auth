@@ -1,4 +1,3 @@
-// FILE: auth/scram_test.go
 package auth
 
 import (
@@ -27,6 +26,7 @@ func setupScramTest(t *testing.T) (server *ScramServer, username, password strin
 
 	// 3. Create a server and add the new credential.
 	server = NewScramServer()
+	t.Cleanup(server.Stop)
 	server.AddCredential(cred)
 
 	return server, username, password, cred
@@ -64,6 +64,7 @@ func TestScram_FullRoundtrip_Success(t *testing.T) {
 // TestScram_FullRoundtrip_WrongPassword ensures authentication fails with an incorrect password.
 func TestScram_FullRoundtrip_WrongPassword(t *testing.T) {
 	server, username, _, _ := setupScramTest(t)
+	defer server.Stop()
 	// Create a client with the WRONG password
 	client := NewScramClient(username, "WrongPassword!!!")
 
@@ -85,22 +86,36 @@ func TestScram_FullRoundtrip_WrongPassword(t *testing.T) {
 }
 
 // TestScram_FullRoundtrip_UserNotFound tests for user enumeration protection.
-// The server should not reveal whether a user exists or not in its first message.
+// The server must be indistinguishable from the wrong-password path: no error at
+// first message, stable decoy salt across probes, ErrInvalidCredentials at proof.
 func TestScram_FullRoundtrip_UserNotFound(t *testing.T) {
 	server, _, _, _ := setupScramTest(t)
+	defer server.Stop()
 	client := NewScramClient("unknown_user", "any_password")
 
 	clientFirst, err := client.StartAuthentication()
 	require.NoError(t, err)
 
-	// --- Step 2: Server should return an error, but also a FAKE response ---
-	// This prevents an attacker from knowing if the user exists based on the response structure.
+	// unknown user must not error here
 	serverFirst, err := server.ProcessClientFirstMessage(clientFirst.Username, clientFirst.ClientNonce)
-	assert.ErrorIs(t, err, ErrInvalidCredentials, "Server should return an error for an unknown user")
-	assert.NotEmpty(t, serverFirst.FullNonce, "Server must still provide a nonce to prevent enumeration")
-	assert.NotEmpty(t, serverFirst.Salt, "Server must still provide a salt to prevent enumeration")
+	require.NoError(t, err, "unknown user must not be signalled at first message")
+	assert.NotEmpty(t, serverFirst.FullNonce)
+	assert.NotEmpty(t, serverFirst.Salt)
 
-	t.Log("SCRAM correctly protected against user enumeration")
+	// decoy salt must be stable across repeated probes
+	second, err := server.ProcessClientFirstMessage(clientFirst.Username, "probe-nonce-2")
+	require.NoError(t, err)
+	assert.Equal(t, serverFirst.Salt, second.Salt, "decoy salt must be deterministic")
+	assert.Equal(t, serverFirst.ArgonTime, second.ArgonTime)
+	assert.Equal(t, serverFirst.ArgonMemory, second.ArgonMemory)
+	assert.Equal(t, serverFirst.ArgonThreads, second.ArgonThreads)
+
+	clientFinal, err := client.ProcessServerFirstMessage(serverFirst)
+	require.NoError(t, err)
+
+	// failure surfaces only here, identical to wrong-password path
+	_, err = server.ProcessClientFinalMessage(clientFinal.FullNonce, clientFinal.ClientProof)
+	assert.ErrorIs(t, err, ErrInvalidCredentials, "unknown user must fail like wrong password")
 }
 
 // TestScram_InvalidNonce simulates a replay attack or message mismatch.

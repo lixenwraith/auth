@@ -1,4 +1,3 @@
-// FILE: auth/token_test.go
 package auth
 
 import (
@@ -79,3 +78,4 @@ func TestConcurrentTokenValidator(t *testing.T) {
 		assert.True(t, validator.ValidateToken(token))
 	}
 }
+

@@ -1,4 +1,3 @@
-// FILE: auth/scram.go
 package auth
 
 import (
@@ -8,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,7 +21,11 @@ const (
 	// ScramHandshakeTimeout defines maximum time for completing SCRAM handshake
 	ScramHandshakeTimeout = 30 * time.Second
 	// ScramCleanupInterval defines how often expired handshakes are cleaned
-	ScramCleanupInterval = 60 * time.Second
+	ScramCleanupInterval = 15 * time.Second
+	// ScramMaxHandshakes bounds concurrent in-flight handshakes. Caps memory,
+	// not compute: per client-first server cost is one HMAC. Rate limiting
+	// upstream remains the control for connection floods.
+	ScramMaxHandshakes = 4096
 )
 
 // Credential stores SCRAM authentication data
@@ -79,13 +83,20 @@ func ImportCredential(data map[string]any) (*Credential, error) {
 		}
 		switch v := val.(type) {
 		case float64:
+			// out-of-range float→int conversion is undefined in Go
+			if v < 0 || v > math.MaxUint32 || v != math.Trunc(v) {
+				return 0, fmt.Errorf("%w: %s", ErrCredInvalidType, key)
+			}
 			return uint32(v), nil
 		case int:
+			if v < 0 || int64(v) > math.MaxUint32 {
+				return 0, fmt.Errorf("%w: %s", ErrCredInvalidType, key)
+			}
 			return uint32(v), nil
 		case uint32:
 			return v, nil
 		default:
-			return 0, fmt.Errorf("invalid type for %s", key)
+			return 0, fmt.Errorf("%w: %s", ErrCredInvalidType, key)
 		}
 	}
 
@@ -106,8 +117,14 @@ func ImportCredential(data map[string]any) (*Credential, error) {
 	var argonThreads uint8
 	switch v := threadsVal.(type) {
 	case float64:
+		if v < 0 || v > math.MaxUint8 || v != math.Trunc(v) {
+			return nil, fmt.Errorf("%w: argon_threads", ErrCredInvalidType)
+		}
 		argonThreads = uint8(v)
 	case int:
+		if v < 0 || v > math.MaxUint8 {
+			return nil, fmt.Errorf("%w: argon_threads", ErrCredInvalidType)
+		}
 		argonThreads = uint8(v)
 	case uint8:
 		argonThreads = v
@@ -133,6 +150,17 @@ func ImportCredential(data map[string]any) (*Credential, error) {
 		return nil, fmt.Errorf("%w: %v", ErrCredInvalidServerKey, err)
 	}
 
+	// Post-decode validation
+	if argonTime == 0 || argonMemory == 0 || argonThreads == 0 {
+		return nil, ErrSCRAMZeroParams
+	}
+	if len(salt) < 16 {
+		return nil, ErrSCRAMSaltTooShort
+	}
+	if len(storedKey) != sha256.Size || len(serverKey) != sha256.Size {
+		return nil, ErrCredInvalidStoredKey
+	}
+
 	return &Credential{
 		Username:     username,
 		Salt:         salt,
@@ -154,23 +182,12 @@ func DeriveCredential(username, password string, salt []byte, time, memory uint3
 		return nil, ErrSCRAMZeroParams
 	}
 
-	// Derive salted password using Argon2id
+	if len(password) > MaxPasswordLen {
+		return nil, ErrPasswordTooLong
+	}
+
 	saltedPassword := argon2.IDKey([]byte(password), salt, time, memory, threads, DefaultArgonKeyLen)
-
-	// Derive keys
-	clientKey := computeHMAC(saltedPassword, []byte("Client Key"))
-	serverKey := computeHMAC(saltedPassword, []byte("Server Key"))
-	storedKey := sha256.Sum256(clientKey)
-
-	return &Credential{
-		Username:     username,
-		Salt:         salt,
-		ArgonTime:    time,
-		ArgonMemory:  memory,
-		ArgonThreads: threads,
-		StoredKey:    storedKey[:],
-		ServerKey:    serverKey,
-	}, nil
+	return credentialFromSaltedPassword(username, saltedPassword, salt, time, memory, threads), nil
 }
 
 // HandshakeState tracks ongoing authentication
@@ -181,37 +198,57 @@ type HandshakeState struct {
 	FullNonce   string
 	Credential  *Credential
 	CreatedAt   time.Time
-	verifying   int32 // Atomic flag to prevent race during verification
+	verifying   atomic.Int32 // Atomic flag to prevent race during verification
 }
 
 // ScramServer handles server-side SCRAM authentication
 type ScramServer struct {
 	credentials   map[string]*Credential
 	handshakes    map[string]*HandshakeState
+	decoyKey      []byte     // HMAC key for stable decoy salts
+	decoyTemplate Credential // param/salt-length shape mirrored to unknown users
 	mu            sync.RWMutex
 	cleanupTicker *time.Ticker
 	cleanupStop   chan struct{}
+	stopOnce      sync.Once
 }
 
 // NewScramServer creates SCRAM server
 func NewScramServer() *ScramServer {
+	decoyKey := make([]byte, 32)
+	rand.Read(decoyKey)
 	s := &ScramServer{
 		credentials:   make(map[string]*Credential),
 		handshakes:    make(map[string]*HandshakeState),
+		decoyKey:      decoyKey,
 		cleanupTicker: time.NewTicker(ScramCleanupInterval),
 		cleanupStop:   make(chan struct{}),
 	}
 
-	// Start background cleanup goroutine
 	go s.cleanupLoop()
 
 	return s
 }
 
+// decoySalt generates stable decoy salt; indistinguishable across repeated probes
+func (s *ScramServer) decoySalt(username string) []byte {
+	n := len(s.decoyTemplate.Salt)
+	if n < 16 {
+		n = DefaultArgonSaltLen
+	}
+	out := make([]byte, 0, n)
+	for i := 0; len(out) < n; i++ {
+		out = append(out, computeHMAC(s.decoyKey, fmt.Appendf(nil, "%s|%d", username, i))...)
+	}
+	return out[:n]
+}
+
 // Stop gracefully shuts down the server and cleanup goroutine
 func (s *ScramServer) Stop() {
-	close(s.cleanupStop)
-	s.cleanupTicker.Stop()
+	s.stopOnce.Do(func() {
+		close(s.cleanupStop)
+		s.cleanupTicker.Stop()
+	})
 }
 
 // cleanupLoop runs periodic cleanup of expired handshakes
@@ -226,57 +263,86 @@ func (s *ScramServer) cleanupLoop() {
 	}
 }
 
-// cleanupExpiredHandshakes removes handshakes older than timeout
+// locking split from sweep logic
 func (s *ScramServer) cleanupExpiredHandshakes() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.evictExpiredLocked()
+}
 
+// evictExpiredLocked removes timed-out handshakes. Caller holds s.mu.
+func (s *ScramServer) evictExpiredLocked() {
 	cutoff := time.Now().Add(-ScramHandshakeTimeout)
 	for nonce, state := range s.handshakes {
-		if state.CreatedAt.Before(cutoff) && atomic.LoadInt32(&state.verifying) == 0 {
+		if state.CreatedAt.Before(cutoff) && state.verifying.Load() == 0 {
 			delete(s.handshakes, nonce)
 		}
 	}
 }
 
 // ProcessClientFirstMessage processes initial auth request
+//
+// An unknown username does NOT produce an error here. The server returns
+// a deterministic decoy salt and stores a decoy handshake so that failure
+// surfaces only at ProcessClientFinalMessage as ErrInvalidCredentials, matching
+// the wrong-password path. Callers must not treat a successful return as
+// evidence that the account exists, and must not log it as an auth success.
+//
+// ErrSCRAMTooManyHandshakes is returned when the in-flight handshake cap is
+// reached; the cap is applied before credential lookup so the rejection path is
+// identical for known and unknown users.
 func (s *ScramServer) ProcessClientFirstMessage(username, clientNonce string) (ServerFirstMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if user exists
-	cred, exists := s.credentials[username]
-	if !exists {
-		// Prevent user enumeration - still generate response
-		salt := make([]byte, 16)
-		rand.Read(salt)
-		serverNonce := generateNonce()
-
-		return ServerFirstMessage{
-			FullNonce:    clientNonce + serverNonce,
-			Salt:         base64.StdEncoding.EncodeToString(salt),
-			ArgonTime:    DefaultArgonTime,
-			ArgonMemory:  DefaultArgonMemory,
-			ArgonThreads: DefaultArgonThreads,
-		}, ErrInvalidCredentials
+	// opportunistic sweep, then hard cap. Applied before the credential
+	// lookup so the rejection path is identical for known and unknown users.
+	if len(s.handshakes) >= ScramMaxHandshakes {
+		s.evictExpiredLocked()
+		if len(s.handshakes) >= ScramMaxHandshakes {
+			return ServerFirstMessage{}, ErrSCRAMTooManyHandshakes
+		}
 	}
 
 	// Generate server nonce
-	serverNonce := generateNonce()
+	serverNonce := rand.Text()
 	fullNonce := clientNonce + serverNonce
 
-	// Store handshake state
-	state := &HandshakeState{
-		Username:    username,
-		ClientNonce: clientNonce,
-		ServerNonce: serverNonce,
-		FullNonce:   fullNonce,
-		Credential:  cred,
-		CreatedAt:   time.Now(),
-		verifying:   0,
+	// Check if user exists
+	cred, exists := s.credentials[username]
+	if !exists {
+		t := s.decoyTemplate // mirror real parameter shape
+		if t.ArgonTime == 0 {
+			t.ArgonTime, t.ArgonMemory, t.ArgonThreads = DefaultArgonTime, DefaultArgonMemory, DefaultArgonThreads
+		}
+		// Deterministic salt + stored decoy handshake so the final
+		// step fails with ErrInvalidCredentials, matching the wrong-password path.
+		decoy := &Credential{
+			Username:     username,
+			Salt:         s.decoySalt(username),
+			ArgonTime:    t.ArgonTime,
+			ArgonMemory:  t.ArgonMemory,
+			ArgonThreads: t.ArgonThreads,
+			StoredKey:    make([]byte, sha256.Size), // never matches a real proof
+			ServerKey:    make([]byte, sha256.Size),
+		}
+		s.handshakes[fullNonce] = &HandshakeState{
+			Username: username, ClientNonce: clientNonce, ServerNonce: serverNonce,
+			FullNonce: fullNonce, Credential: decoy, CreatedAt: time.Now(),
+		}
+		return ServerFirstMessage{
+			FullNonce:    fullNonce,
+			Salt:         base64.StdEncoding.EncodeToString(decoy.Salt),
+			ArgonTime:    decoy.ArgonTime,
+			ArgonMemory:  decoy.ArgonMemory,
+			ArgonThreads: decoy.ArgonThreads,
+		}, nil // No early error → same control flow as valid user
 	}
-	s.handshakes[fullNonce] = state
 
+	s.handshakes[fullNonce] = &HandshakeState{
+		Username: username, ClientNonce: clientNonce, ServerNonce: serverNonce,
+		FullNonce: fullNonce, Credential: cred, CreatedAt: time.Now(),
+	}
 	return ServerFirstMessage{
 		FullNonce:    fullNonce,
 		Salt:         base64.StdEncoding.EncodeToString(cred.Salt),
@@ -288,20 +354,21 @@ func (s *ScramServer) ProcessClientFirstMessage(username, clientNonce string) (S
 
 // ProcessClientFinalMessage verifies client proof
 func (s *ScramServer) ProcessClientFinalMessage(fullNonce, clientProof string) (ServerFinalMessage, error) {
-	s.mu.RLock()
+	// ookup + CAS under one write lock; closes the sweep race
+	s.mu.Lock()
 	state, exists := s.handshakes[fullNonce]
-	s.mu.RUnlock()
-
 	if !exists {
+		s.mu.Unlock()
 		return ServerFinalMessage{}, ErrSCRAMInvalidNonce
 	}
-
-	// Mark as verifying to prevent deletion race
-	if !atomic.CompareAndSwapInt32(&state.verifying, 0, 1) {
+	ok := state.verifying.CompareAndSwap(0, 1)
+	s.mu.Unlock()
+	if !ok {
 		return ServerFinalMessage{}, ErrSCRAMVerifyInProgress
 	}
+
 	defer func() {
-		atomic.StoreInt32(&state.verifying, 0)
+		state.verifying.Store(0)
 		// Safe to delete after verification completes
 		s.mu.Lock()
 		delete(s.handshakes, fullNonce)
@@ -313,7 +380,6 @@ func (s *ScramServer) ProcessClientFinalMessage(fullNonce, clientProof string) (
 		return ServerFinalMessage{}, ErrSCRAMTimeout
 	}
 
-	// [rest of verification logic unchanged]
 	// Decode client proof
 	clientProofBytes, err := base64.StdEncoding.DecodeString(clientProof)
 	if err != nil {
@@ -361,14 +427,11 @@ func (s *ScramServer) AddCredential(cred *Credential) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.credentials[cred.Username] = cred
-}
-
-func (s *ScramServer) cleanupHandshakes() {
-	cutoff := time.Now().Add(-60 * time.Second)
-	for nonce, state := range s.handshakes {
-		if state.CreatedAt.Before(cutoff) && atomic.LoadInt32(&state.verifying) == 0 {
-			delete(s.handshakes, nonce)
-		}
+	s.decoyTemplate = Credential{
+		Salt:         make([]byte, len(cred.Salt)),
+		ArgonTime:    cred.ArgonTime,
+		ArgonMemory:  cred.ArgonMemory,
+		ArgonThreads: cred.ArgonThreads,
 	}
 }
 
@@ -393,14 +456,15 @@ func NewScramClient(username, password string) *ScramClient {
 
 // StartAuthentication generates initial client message
 func (c *ScramClient) StartAuthentication() (ClientFirstRequest, error) {
+	// Reject oversized password before the handshake commits to a KDF pass
+	if len(c.Password) > MaxPasswordLen {
+		return ClientFirstRequest{}, ErrPasswordTooLong
+	}
+
 	c.startTime = time.Now()
 
 	// Generate client nonce
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return ClientFirstRequest{}, ErrSCRAMNonceGenFailed
-	}
-	c.clientNonce = base64.StdEncoding.EncodeToString(nonce)
+	c.clientNonce = rand.Text()
 
 	return ClientFirstRequest{
 		Username:    c.Username,
@@ -460,7 +524,6 @@ func (c *ScramClient) VerifyServerFinalMessage(msg ServerFinalMessage) error {
 		return ErrSCRAMTimeout
 	}
 
-	// [rest unchanged]
 	if c.authMessage == "" || c.serverKey == nil {
 		return ErrSCRAMInvalidState
 	}
@@ -536,10 +599,4 @@ func xorBytes(a, b []byte) []byte {
 		result[i] = a[i] ^ b[i]
 	}
 	return result
-}
-
-func generateNonce() string {
-	b := make([]byte, 32)
-	rand.Read(b)
-	return base64.StdEncoding.EncodeToString(b)
 }

@@ -1,4 +1,3 @@
-// FILE: auth/errors.go
 package auth
 
 import (
@@ -10,19 +9,19 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrWeakPassword       = errors.New("password must be at least 8 characters")
+	ErrPasswordTooLong    = errors.New("password must be at most 1024 characters")
 )
 
 // JWT-specific errors
 var (
-	ErrTokenMalformed         = errors.New("token: malformed structure")
-	ErrTokenExpired           = errors.New("token: expired")
-	ErrTokenNotYetValid       = errors.New("token: not yet valid")
-	ErrTokenInvalidSignature  = errors.New("token: invalid signature")
-	ErrTokenAlgorithmMismatch = errors.New("token: algorithm mismatch")
-	ErrTokenMissingClaim      = errors.New("token: missing required claim")
-	ErrTokenEmptyUserID       = errors.New("token: empty user ID")
-	ErrTokenNoPrivateKey      = errors.New("token: private key required for signing")
-	ErrTokenNoPublicKey       = errors.New("token: public key required for verification")
+	ErrTokenMalformed        = errors.New("token: malformed structure")
+	ErrTokenExpired          = errors.New("token: expired")
+	ErrTokenNotYetValid      = errors.New("token: not yet valid")
+	ErrTokenInvalidSignature = errors.New("token: invalid signature")
+	ErrTokenMissingClaim     = errors.New("token: missing required claim")
+	ErrTokenEmptyUserID      = errors.New("token: empty user ID")
+	ErrTokenNoPrivateKey     = errors.New("token: private key required for signing")
+	ErrTokenNoPublicKey      = errors.New("token: public key required for verification")
 )
 
 // JWT secret errors
@@ -47,17 +46,17 @@ var (
 
 // SCRAM-specific errors
 var (
-	ErrSCRAMInvalidNonce     = errors.New("scram: invalid nonce or expired handshake")
-	ErrSCRAMTimeout          = errors.New("scram: handshake timeout")
-	ErrSCRAMVerifyInProgress = errors.New("scram: verification already in progress")
-	ErrSCRAMInvalidProof     = errors.New("scram: invalid proof encoding")
-	ErrSCRAMInvalidProofLen  = errors.New("scram: invalid proof length")
-	ErrSCRAMServerAuthFailed = errors.New("scram: server authentication failed")
-	ErrSCRAMInvalidState     = errors.New("scram: invalid handshake state")
-	ErrSCRAMInvalidSalt      = errors.New("scram: invalid salt encoding")
-	ErrSCRAMZeroParams       = errors.New("scram: invalid Argon2 parameters")
-	ErrSCRAMSaltTooShort     = errors.New("scram: salt must be at least 16 bytes")
-	ErrSCRAMNonceGenFailed   = errors.New("scram: failed to generate nonce")
+	ErrSCRAMInvalidNonce      = errors.New("scram: invalid nonce or expired handshake")
+	ErrSCRAMTimeout           = errors.New("scram: handshake timeout")
+	ErrSCRAMVerifyInProgress  = errors.New("scram: verification already in progress")
+	ErrSCRAMInvalidProof      = errors.New("scram: invalid proof encoding")
+	ErrSCRAMInvalidProofLen   = errors.New("scram: invalid proof length")
+	ErrSCRAMServerAuthFailed  = errors.New("scram: server authentication failed")
+	ErrSCRAMInvalidState      = errors.New("scram: invalid handshake state")
+	ErrSCRAMInvalidSalt       = errors.New("scram: invalid salt encoding")
+	ErrSCRAMZeroParams        = errors.New("scram: invalid Argon2 parameters")
+	ErrSCRAMSaltTooShort      = errors.New("scram: salt must be at least 16 bytes")
+	ErrSCRAMTooManyHandshakes = errors.New("scram: handshake capacity exceeded")
 )
 
 // Credential import/export errors
@@ -87,9 +86,4 @@ var (
 // Salt generation errors
 var (
 	ErrSaltGenerationFailed = errors.New("failed to generate salt")
-)
-
-// Key generation errors
-var (
-	ErrRSAKeyGenFailed = errors.New("failed to generate RSA key")
 )

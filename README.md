@@ -23,10 +23,22 @@ userID, claims, _ := jwtMgr.ValidateToken(token)
 
 // SCRAM authentication
 server := auth.NewScramServer()
+defer server.Stop()
 phcHash, _ := auth.HashPassword("password123")
 cred, _ := auth.MigrateFromPHC("user", "password123", phcHash)
 server.AddCredential(cred)
 ```
+
+### SCRAM contract notes
+
+- Unknown usernames succeed at `ProcessClientFirstMessage` and fail at
+  `ProcessClientFinalMessage` with `ErrInvalidCredentials`. This is deliberate
+  user-enumeration protection. Do not log the first message as an auth success.
+- Decoy Argon2 parameters mirror the most recently added credential. Provision
+  all credentials in a deployment with identical parameters, or the decoy shape
+  becomes a distinguisher.
+- Passwords are bounded by `MaxPasswordLen` (1024 bytes) at every KDF entry
+  point.
 
 ## Package Structure
 

@@ -1,4 +1,3 @@
-// FILE: auth/doc.go
 package auth
 
 /*
@@ -37,6 +36,7 @@ Server and client implementation for SCRAM:
 
 	// Server
 	server := auth.NewScramServer()
+	defer server.Stop()
 	server.AddCredential(credential)
 
 	// Client

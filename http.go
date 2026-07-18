@@ -1,4 +1,3 @@
-// FILE: auth/http.go
 package auth
 
 import (
@@ -59,3 +58,4 @@ func ExtractAuthType(header string) string {
 	}
 	return ""
 }
+

@@ -1,9 +1,9 @@
-// FILE: auth/argon2.go
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
-	"crypto/subtle"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -18,6 +18,11 @@ const (
 	DefaultArgonThreads = 4
 	DefaultArgonSaltLen = 16
 	DefaultArgonKeyLen  = 32
+	MaxPasswordLen      = 1024
+	// upper bounds for untrusted PHC input
+	MaxArgonSaltLen = 64
+	MaxArgonKeyLen  = 64
+	MaxPHCHashLen   = 256
 )
 
 // argonParams holds configurable Argon2id parameters
@@ -64,6 +69,9 @@ func HashPassword(password string, opts ...Option) (string, error) {
 	if len(password) < 8 {
 		return "", ErrWeakPassword
 	}
+	if len(password) > MaxPasswordLen {
+		return "", ErrPasswordTooLong
+	}
 
 	params := &argonParams{
 		time:    DefaultArgonTime,
@@ -92,62 +100,50 @@ func HashPassword(password string, opts ...Option) (string, error) {
 
 // VerifyPassword checks password against PHC-format hash (standalone)
 func VerifyPassword(password, phcHash string) error {
-	parts := strings.Split(phcHash, "$")
-	if len(parts) != 6 || parts[1] != "argon2id" {
-		return ErrPHCInvalidFormat
-	}
-
-	var memory, time uint32
-	var threads uint8
-	fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads)
-
-	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrPHCInvalidSalt, err)
-	}
-
-	expectedHash, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrPHCInvalidHash, err)
-	}
-
-	computedHash := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(expectedHash)))
-
-	if subtle.ConstantTimeCompare(computedHash, expectedHash) != 1 {
-		return ErrInvalidCredentials
-	}
-
-	return nil
+	_, err := verifyPHC(password, phcHash)
+	return err
 }
 
 // MigrateFromPHC converts PHC hash to SCRAM credential
 func MigrateFromPHC(username, password, phcHash string) (*Credential, error) {
-	parts := strings.Split(phcHash, "$")
-	if len(parts) != 6 || parts[1] != "argon2id" {
-		return nil, ErrPHCInvalidFormat
-	}
-
-	var memory, time uint32
-	var threads uint8
-	fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads)
-
-	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	r, err := verifyPHC(password, phcHash)
 	if err != nil {
-		return nil, ErrPHCInvalidSalt
-	}
-
-	// Use standalone function for verification
-	if err := VerifyPassword(password, phcHash); err != nil {
 		return nil, err
 	}
+	if len(r.derived) == DefaultArgonKeyLen {
+		return credentialFromSaltedPassword(username, r.derived, r.salt, r.time, r.memory, r.threads), nil
+	}
+	// Non-standard digest length: derive at the required key length.
+	return DeriveCredential(username, password, r.salt, r.time, r.memory, r.threads)
+}
 
-	return DeriveCredential(username, password, salt, time, memory, threads)
+// key derivation split from the KDF so callers holding a salted
+// password can build a credential without re-running Argon2.
+func credentialFromSaltedPassword(username string, saltedPassword, salt []byte, time, memory uint32, threads uint8) *Credential {
+	clientKey := computeHMAC(saltedPassword, []byte("Client Key"))
+	serverKey := computeHMAC(saltedPassword, []byte("Server Key"))
+	storedKey := sha256.Sum256(clientKey)
+
+	return &Credential{
+		Username:     username,
+		Salt:         salt,
+		ArgonTime:    time,
+		ArgonMemory:  memory,
+		ArgonThreads: threads,
+		StoredKey:    storedKey[:],
+		ServerKey:    serverKey,
+	}
 }
 
 // ValidatePHCHashFormat checks if a hash string has a valid and complete
 // PHC format for Argon2id. It validates structure, parameters, and encoding,
 // but does not verify a password against the hash.
 func ValidatePHCHashFormat(phcHash string) error {
+	// Cap total input before any splitting or base64 decoding
+	if len(phcHash) > MaxPHCHashLen {
+		return fmt.Errorf("%w: encoded hash exceeds %d bytes", ErrPHCInvalidFormat, MaxPHCHashLen)
+	}
+
 	parts := strings.Split(phcHash, "$")
 	if len(parts) != 6 {
 		return fmt.Errorf("%w: expected 6 parts, got %d", ErrPHCInvalidFormat, len(parts))
@@ -203,6 +199,9 @@ func ValidatePHCHashFormat(phcHash string) error {
 	if len(salt) < 8 { // Minimum safe salt length
 		return fmt.Errorf("%w: salt too short (%d bytes)", ErrPHCInvalidSalt, len(salt))
 	}
+	if len(salt) > MaxArgonSaltLen {
+		return fmt.Errorf("%w: salt too long (%d bytes)", ErrPHCInvalidSalt, len(salt))
+	}
 
 	// Validate hash encoding
 	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
@@ -212,6 +211,45 @@ func ValidatePHCHashFormat(phcHash string) error {
 	if len(hash) < 16 { // Minimum hash length
 		return fmt.Errorf("%w: hash too short (%d bytes)", ErrPHCInvalidHash, len(hash))
 	}
+	if len(hash) > MaxArgonKeyLen {
+		return fmt.Errorf("%w: hash too long (%d bytes)", ErrPHCInvalidHash, len(hash))
+	}
 
 	return nil
+}
+
+// parsed + verified PHC material, reused to avoid a second KDF pass
+type phcResult struct {
+	derived []byte // argon2.IDKey output; == SCRAM salted password when len == DefaultArgonKeyLen
+	salt    []byte
+	time    uint32
+	memory  uint32
+	threads uint8
+}
+
+// verifyPHC validates format, bounds the password, runs the KDF once, and
+// constant-time compares against the encoded digest.
+func verifyPHC(password, phcHash string) (*phcResult, error) {
+	if err := ValidatePHCHashFormat(phcHash); err != nil {
+		return nil, err
+	}
+	if len(password) > MaxPasswordLen {
+		return nil, ErrPasswordTooLong
+	}
+
+	parts := strings.Split(phcHash, "$")
+
+	r := &phcResult{}
+	// Parse is guaranteed well-formed by ValidatePHCHashFormat above.
+	fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &r.memory, &r.time, &r.threads)
+
+	// Encodings validated above; errors are unreachable.
+	r.salt, _ = base64.RawStdEncoding.DecodeString(parts[4])
+	expected, _ := base64.RawStdEncoding.DecodeString(parts[5])
+
+	r.derived = argon2.IDKey([]byte(password), r.salt, r.time, r.memory, r.threads, uint32(len(expected)))
+	if !hmac.Equal(r.derived, expected) {
+		return nil, ErrInvalidCredentials
+	}
+	return r, nil
 }

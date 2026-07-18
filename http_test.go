@@ -1,4 +1,3 @@
-// FILE: auth/http_test.go
 package auth
 
 import (
@@ -52,3 +51,4 @@ func TestHTTPAuthParsing(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, ErrAuthEmptyBearerToken, err)
 }
+

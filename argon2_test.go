@@ -1,4 +1,3 @@
-// FILE: auth/argon2_test.go
 package auth
 
 import (
@@ -154,6 +153,14 @@ func TestValidatePHCHashFormat(t *testing.T) {
 			base64.RawStdEncoding.EncodeToString([]byte("short")), ErrPHCInvalidHash},
 		{"too few parts", "$argon2id$v=19$m=65536,t=3,p=4", ErrPHCInvalidFormat},
 		{"too many parts", "$argon2id$v=19$m=65536,t=3,p=4$salt$hash$extra", ErrPHCInvalidFormat},
+		{"oversized salt", "$argon2id$v=19$m=65536,t=3,p=4$" +
+			base64.RawStdEncoding.EncodeToString(make([]byte, 128)) + "$" +
+			base64.RawStdEncoding.EncodeToString([]byte("hash1234567890123456")), ErrPHCInvalidSalt},
+		{"oversized hash", "$argon2id$v=19$m=65536,t=3,p=4$" +
+			base64.RawStdEncoding.EncodeToString([]byte("salt12345678")) + "$" +
+			base64.RawStdEncoding.EncodeToString(make([]byte, 128)), ErrPHCInvalidHash},
+		{"oversized input", "$argon2id$v=19$m=65536,t=3,p=4$" +
+			strings.Repeat("A", 512) + "$hash", ErrPHCInvalidFormat},
 	}
 
 	for _, tc := range testCases {
@@ -172,4 +179,14 @@ func TestValidatePHCHashFormat(t *testing.T) {
 	require.NoError(t, err)
 	err = VerifyPassword("testPassword123", validHash)
 	assert.NoError(t, err, "Validated hash should still work for password verification")
+}
+
+func TestVerifyPassword_MalformedParamsNoPanic(t *testing.T) {
+	for _, h := range []string{
+		"$argon2id$v=19$m=65536,t=0,p=4$c2FsdHNhbHRzYWx0MTI$aGFzaGhhc2hoYXNoaGFzaA",
+		"$argon2id$v=19$m=65536,t=3,p=0$c2FsdHNhbHRzYWx0MTI$aGFzaGhhc2hoYXNoaGFzaA",
+		"$argon2id$v=19$garbage$c2FsdHNhbHRzYWx0MTI$aGFzaGhhc2hoYXNoaGFzaA",
+	} {
+		assert.Error(t, VerifyPassword("whatever", h))
+	}
 }

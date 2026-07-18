@@ -1,4 +1,3 @@
-// FILE: auth/jwt.go
 package auth
 
 import (
@@ -206,10 +205,7 @@ func mapJWTError(err error) error {
 	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
 		return fmt.Errorf("%w : %w", ErrTokenMissingClaim, err)
 	default:
-		// Check for algorithm mismatch in error message
-		if errors.Is(err, jwt.ErrTokenSignatureInvalid) {
-			return fmt.Errorf("%w : %w", ErrTokenAlgorithmMismatch, err)
-		}
+		// Alg rejection (WithValidMethods) surfaces as ErrTokenSignatureInvalid.
 		return fmt.Errorf("%w : %w", ErrTokenMalformed, err)
 	}
 }
@@ -221,12 +217,16 @@ func GenerateHS256Token(secret []byte, userID string, claims map[string]any, lif
 	if len(secret) < 32 {
 		return "", ErrSecretTooShort
 	}
+	if userID == "" {
+		return "", ErrTokenEmptyUserID
+	}
 
 	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, customClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(lifetime)),
 		},
 		Extra: claims,
@@ -244,6 +244,7 @@ func ValidateHS256Token(secret []byte, tokenString string) (string, map[string]a
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"HS256"}),
 		jwt.WithLeeway(DefaultLeeway),
+		jwt.WithExpirationRequired(),
 	)
 
 	token, err := parser.ParseWithClaims(tokenString, &customClaims{}, func(token *jwt.Token) (any, error) {
@@ -290,8 +291,16 @@ func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	if block == nil {
 		return nil, ErrRSAInvalidPEM
 	}
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	// PKCS8 fallback
+	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
+		return nil, ErrRSAInvalidPrivateKey
+	}
+	key, ok := keyAny.(*rsa.PrivateKey)
+	if !ok {
 		return nil, ErrRSAInvalidPrivateKey
 	}
 	return key, nil

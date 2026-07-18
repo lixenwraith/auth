@@ -1,4 +1,3 @@
-// FILE: auth/jwt_test.go
 package auth
 
 import (
@@ -257,3 +256,4 @@ func TestJWTRSAFromPEM(t *testing.T) {
 	_, err = NewJWTVerifierFromPEM([]byte("invalid pem data"))
 	assert.ErrorIs(t, err, ErrRSAInvalidPEM)
 }
+
