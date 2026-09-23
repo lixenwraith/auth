@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -15,6 +18,8 @@ import (
 const (
 	DefaultTokenLifetime = 24 * time.Hour
 	DefaultLeeway        = 5 * time.Minute
+	MaxTokenLen          = 16 * 1024
+	MinRSABits           = 2048
 )
 
 // customClaims extends RegisteredClaims with arbitrary user data
@@ -23,8 +28,10 @@ type customClaims struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// JWT manages token generation and validation
+// JWT manages token generation and validation. Construct once and reuse; its
+// immutable configuration and parser are safe for concurrent use.
 type JWT struct {
+	parser        *jwt.Parser
 	algorithm     jwt.SigningMethod
 	signKey       any // []byte for HMAC, *rsa.PrivateKey for RSA
 	verifyKey     any // []byte for HMAC, *rsa.PublicKey for RSA
@@ -34,7 +41,8 @@ type JWT struct {
 	audience      []string
 }
 
-// JWTOption configures JWT behavior
+// JWTOption configures JWT behavior at construction time. Do not apply options
+// to an existing manager.
 type JWTOption func(*JWT)
 
 // WithTokenLifetime sets token expiration duration
@@ -65,7 +73,7 @@ func WithIssuer(iss string) JWTOption {
 // WithAudience sets token audience claim
 func WithAudience(aud []string) JWTOption {
 	return func(j *JWT) {
-		j.audience = aud
+		j.audience = append([]string(nil), aud...)
 	}
 }
 
@@ -75,6 +83,7 @@ func NewJWT(secret []byte, opts ...JWTOption) (*JWT, error) {
 		return nil, ErrSecretTooShort
 	}
 
+	secret = bytes.Clone(secret)
 	j := &JWT{
 		algorithm:     jwt.SigningMethodHS256,
 		signKey:       secret,
@@ -83,10 +92,7 @@ func NewJWT(secret []byte, opts ...JWTOption) (*JWT, error) {
 		leeway:        DefaultLeeway,
 	}
 
-	for _, opt := range opts {
-		opt(j)
-	}
-
+	j.configure(opts)
 	return j, nil
 }
 
@@ -96,6 +102,10 @@ func NewJWTRSA(privateKey *rsa.PrivateKey, opts ...JWTOption) (*JWT, error) {
 		return nil, ErrTokenNoPrivateKey
 	}
 
+	privateKey, err := cloneRSAPrivateKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
 	j := &JWT{
 		algorithm:     jwt.SigningMethodRS256,
 		signKey:       privateKey,
@@ -104,10 +114,7 @@ func NewJWTRSA(privateKey *rsa.PrivateKey, opts ...JWTOption) (*JWT, error) {
 		leeway:        DefaultLeeway,
 	}
 
-	for _, opt := range opts {
-		opt(j)
-	}
-
+	j.configure(opts)
 	return j, nil
 }
 
@@ -127,6 +134,10 @@ func NewJWTVerifier(publicKey *rsa.PublicKey, opts ...JWTOption) (*JWT, error) {
 		return nil, ErrTokenNoPublicKey
 	}
 
+	if err := validateRSAPublicKey(publicKey); err != nil {
+		return nil, err
+	}
+	publicKey = &rsa.PublicKey{N: new(big.Int).Set(publicKey.N), E: publicKey.E}
 	j := &JWT{
 		algorithm:     jwt.SigningMethodRS256,
 		signKey:       nil, // Cannot sign
@@ -135,10 +146,7 @@ func NewJWTVerifier(publicKey *rsa.PublicKey, opts ...JWTOption) (*JWT, error) {
 		leeway:        DefaultLeeway,
 	}
 
-	for _, opt := range opts {
-		opt(j)
-	}
-
+	j.configure(opts)
 	return j, nil
 }
 
@@ -177,33 +185,55 @@ func (j *JWT) GenerateToken(userID string, claims map[string]any) (string, error
 		Extra:            claims,
 	})
 
-	return token.SignedString(j.signKey)
+	signed, err := token.SignedString(j.signKey)
+	if len(signed) > MaxTokenLen {
+		return "", ErrTokenTooLong
+	}
+	return signed, err
 }
 
-// ValidateToken verifies JWT and extracts claims
-func (j *JWT) ValidateToken(tokenString string) (string, map[string]any, error) {
-	parser := jwt.NewParser(
-		jwt.WithLeeway(j.leeway),
-		jwt.WithAudience(j.audience...),
-		jwt.WithIssuer(j.issuer),
-		jwt.WithValidMethods([]string{j.algorithm.Alg()}),
-		jwt.WithExpirationRequired(),
+func (j *JWT) configure(opts []JWTOption) {
+	for _, opt := range opts {
+		if opt != nil {
+			opt(j)
+		}
+	}
+	j.parser = jwt.NewParser(
+		jwt.WithLeeway(j.leeway), jwt.WithAudience(j.audience...), jwt.WithIssuer(j.issuer),
+		jwt.WithValidMethods([]string{j.algorithm.Alg()}), jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(), jwt.WithStrictDecoding(),
 	)
+}
 
+// ValidateToken verifies JWT and returns a nonempty subject plus application
+// claims. Issuer/audience are enforced when configured; claims are nil on error.
+func (j *JWT) ValidateToken(tokenString string) (string, map[string]any, error) {
+	return validateJWT(j.parser, j.verifyKey, tokenString)
+}
+
+func validateJWT(parser *jwt.Parser, key any, tokenString string) (string, map[string]any, error) {
+	if len(tokenString) > MaxTokenLen {
+		return "", nil, ErrTokenTooLong
+	}
+	if strings.ContainsAny(tokenString, "\r\n") {
+		return "", nil, ErrTokenMalformed
+	}
 	token, err := parser.ParseWithClaims(tokenString, &customClaims{}, func(token *jwt.Token) (any, error) {
-		// Algorithm already validated by WithValidMethods
-		return j.verifyKey, nil
+		if _, ok := token.Header["crit"]; ok {
+			return nil, ErrTokenMalformed
+		}
+		return key, nil
 	})
-
 	if err != nil {
 		return "", nil, mapJWTError(err)
 	}
-
 	claims, ok := token.Claims.(*customClaims)
 	if !ok || !token.Valid {
 		return "", nil, ErrTokenMalformed
 	}
-
+	if claims.Subject == "" {
+		return "", nil, ErrTokenEmptyUserID
+	}
 	return claims.Subject, claims.Extra, nil
 }
 
@@ -218,7 +248,7 @@ func mapJWTError(err error) error {
 		return fmt.Errorf("%w: %w", ErrTokenInvalidSignature, err)
 	case errors.Is(err, jwt.ErrTokenExpired):
 		return fmt.Errorf("%w: %w", ErrTokenExpired, err)
-	case errors.Is(err, jwt.ErrTokenNotValidYet):
+	case errors.Is(err, jwt.ErrTokenNotValidYet), errors.Is(err, jwt.ErrTokenUsedBeforeIssued):
 		return fmt.Errorf("%w: %w", ErrTokenNotYetValid, err)
 	case errors.Is(err, jwt.ErrTokenInvalidAudience):
 		return fmt.Errorf("%w: %w", ErrTokenMissingClaim, err)
@@ -251,35 +281,61 @@ func GenerateHS256Token(secret []byte, userID string, claims map[string]any, lif
 		Extra: claims,
 	})
 
-	return token.SignedString(secret)
+	signed, err := token.SignedString(secret)
+	if len(signed) > MaxTokenLen {
+		return "", ErrTokenTooLong
+	}
+	return signed, err
 }
 
-// ValidateHS256Token verifies HS256 JWT without manager instance
+// ValidateHS256Token is the legacy unscoped HS256 adapter. It requires exp/sub
+// and validates iat/nbf with DefaultLeeway, but does not constrain issuer/audience.
+// Prefer a reusable JWT with explicit issuer/audience for new services.
 func ValidateHS256Token(secret []byte, tokenString string) (string, map[string]any, error) {
 	if len(secret) < 32 {
 		return "", nil, ErrSecretTooShort
 	}
 
-	parser := jwt.NewParser(
-		jwt.WithValidMethods([]string{"HS256"}),
-		jwt.WithLeeway(DefaultLeeway),
-		jwt.WithExpirationRequired(),
-	)
+	return validateJWT(standaloneHS256Parser, secret, tokenString)
+}
 
-	token, err := parser.ParseWithClaims(tokenString, &customClaims{}, func(token *jwt.Token) (any, error) {
-		return secret, nil
-	})
+var standaloneHS256Parser = jwt.NewParser(
+	jwt.WithValidMethods([]string{"HS256"}), jwt.WithLeeway(DefaultLeeway),
+	jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithStrictDecoding(),
+)
 
-	if err != nil {
-		return "", nil, mapJWTError(err)
+func validateRSAPublicKey(key *rsa.PublicKey) error {
+	if key.N == nil || key.N.Sign() <= 0 || key.N.Bit(0) == 0 || key.E < 3 || key.E&1 == 0 || key.E > 1<<31-1 {
+		return ErrRSAInvalidPublicKey
 	}
-
-	claims, ok := token.Claims.(*customClaims)
-	if !ok || !token.Valid {
-		return "", nil, ErrTokenMalformed
+	if key.N.BitLen() < MinRSABits {
+		return ErrRSAWeakKey
 	}
+	return nil
+}
 
-	return claims.Subject, claims.Extra, nil
+func cloneRSAPrivateKey(key *rsa.PrivateKey) (*rsa.PrivateKey, error) {
+	if err := validateRSAPublicKey(&key.PublicKey); err != nil {
+		return nil, err
+	}
+	if key.D == nil || key.D.Sign() <= 0 || len(key.Primes) < 2 {
+		return nil, ErrRSAInvalidPrivateKey
+	}
+	copy := &rsa.PrivateKey{
+		PublicKey: rsa.PublicKey{N: new(big.Int).Set(key.N), E: key.E},
+		D:         new(big.Int).Set(key.D), Primes: make([]*big.Int, len(key.Primes)),
+	}
+	for i, prime := range key.Primes {
+		if prime == nil || prime.Sign() <= 0 {
+			return nil, ErrRSAInvalidPrivateKey
+		}
+		copy.Primes[i] = new(big.Int).Set(prime)
+	}
+	if err := copy.Validate(); err != nil {
+		return nil, ErrRSAInvalidPrivateKey
+	}
+	copy.Precompute()
+	return copy, nil
 }
 
 // parseRSAPrivateKey parses a PEM-encoded RSA private key.
@@ -308,6 +364,9 @@ func parseRSAPublicKey(pemBytes []byte) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
 		return nil, ErrRSAInvalidPEM
+	}
+	if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+		return key, nil
 	}
 	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {

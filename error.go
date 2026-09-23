@@ -1,15 +1,12 @@
 package auth
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
 // Base authentication errors
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrWeakPassword       = errors.New("password must be at least 8 characters")
-	ErrPasswordTooLong    = errors.New("password must be at most 1024 characters")
+	ErrWeakPassword       = errors.New("password must be at least 8 bytes")
+	ErrPasswordTooLong    = errors.New("password must be at most 1024 bytes")
 )
 
 // JWT-specific errors
@@ -22,6 +19,7 @@ var (
 	ErrTokenEmptyUserID      = errors.New("token: empty user ID")
 	ErrTokenNoPrivateKey     = errors.New("token: private key required for signing")
 	ErrTokenNoPublicKey      = errors.New("token: public key required for verification")
+	ErrTokenTooLong          = errors.New("token: exceeds size limit")
 )
 
 // JWT secret errors
@@ -35,14 +33,16 @@ var (
 	ErrRSAInvalidPrivateKey = errors.New("rsa: invalid private key format")
 	ErrRSAInvalidPublicKey  = errors.New("rsa: invalid public key format")
 	ErrRSANotPublicKey      = errors.New("rsa: not an RSA public key")
+	ErrRSAWeakKey           = errors.New("rsa: key must be at least 2048 bits")
 )
 
 // PHC format errors
 var (
-	ErrPHCInvalidFormat = errors.New("phc: invalid format")
-	ErrPHCInvalidSalt   = errors.New("phc: invalid salt encoding")
-	ErrPHCInvalidHash   = errors.New("phc: invalid hash encoding")
-	ErrPHCCostTooHigh   = errors.New("phc: cost parameters exceed verification limit")
+	ErrPHCInvalidFormat   = errors.New("phc: invalid format")
+	ErrPHCInvalidSalt     = errors.New("phc: invalid salt encoding")
+	ErrPHCInvalidHash     = errors.New("phc: invalid hash encoding")
+	ErrPHCCostTooHigh     = errors.New("phc: cost parameters exceed verification limit")
+	ErrArgonInvalidParams = errors.New("argon2: invalid parameters (require t >= 1, p >= 1, m >= 8*p)")
 )
 
 // SCRAM-specific errors
@@ -59,6 +59,12 @@ var (
 	ErrSCRAMSaltTooShort      = errors.New("scram: salt must be at least 16 bytes")
 	ErrSCRAMTooManyHandshakes = errors.New("scram: handshake capacity exceeded")
 	ErrSCRAMParamsTooLarge    = errors.New("scram: Argon2 parameters exceed limit")
+	ErrSCRAMParamsTooSmall    = errors.New("scram: Argon2 parameters below client minimum")
+	ErrSCRAMInvalidUsername   = errors.New("scram: invalid username")
+	ErrSCRAMSaltTooLong       = errors.New("scram: salt exceeds 64 bytes")
+	ErrSCRAMStopped           = errors.New("scram: server stopped")
+	ErrSCRAMDecoyKey          = errors.New("scram: decoy key must be at least 32 bytes")
+	ErrSCRAMCredentialProfile = errors.New("scram: credentials must share Argon2 parameters and salt length")
 )
 
 // Credential import/export errors
@@ -73,16 +79,13 @@ var (
 	ErrCredInvalidStoredKey = errors.New("credential: invalid stored_key encoding")
 	ErrCredMissingServerKey = errors.New("credential: missing server_key")
 	ErrCredInvalidServerKey = errors.New("credential: invalid server_key encoding")
-	ErrCredInvalidType      = fmt.Errorf("credential: invalid type for field")
+	ErrCredInvalidType      = errors.New("credential: invalid type for field")
 )
 
 // HTTP auth parsing errors
 var (
-	ErrAuthInvalidBasicFormat   = errors.New("auth: invalid Basic auth format")
-	ErrAuthInvalidBasicEncoding = errors.New("auth: invalid Basic auth base64 encoding")
-	ErrAuthInvalidBasicCreds    = errors.New("auth: invalid Basic auth credentials format")
-	ErrAuthInvalidBearerFormat  = errors.New("auth: invalid Bearer auth format")
-	ErrAuthEmptyBearerToken     = errors.New("auth: empty Bearer token")
+	ErrAuthInvalidBearerFormat = errors.New("auth: invalid Bearer auth format")
+	ErrAuthEmptyBearerToken    = errors.New("auth: empty Bearer token")
 )
 
 // Salt generation errors

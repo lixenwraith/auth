@@ -215,7 +215,7 @@ func TestJWTAlgorithmEnforcement(t *testing.T) {
 	_, _, err = rs.ValidateToken(hsToken)
 	errIs(t, err, ErrTokenInvalidSignature, "HS256 token to RS256 manager")
 
-	// ☢ algorithm confusion: HS256 token keyed with the RSA public key
+	// Algorithm confusion: HS256 token keyed with the RSA public key
 	pubBytes, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
 	noErr(t, err, "marshal public key")
 	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes})
@@ -315,8 +315,7 @@ func TestJWTExpiryAndLeeway(t *testing.T) {
 	_, _, err = lenient.ValidateToken(notYet)
 	noErr(t, err, "nbf inside leeway")
 
-	// exp is mandatory. ‼️ mapJWTError has no case for
-	// jwt.ErrTokenRequiredClaimMissing, so this surfaces as malformed.
+	// exp is mandatory.
 	noExp := signHS256(t, testSecret, defaultHeader(), map[string]any{"sub": "u", "iat": now.Unix()})
 	_, _, err = strict.ValidateToken(noExp)
 	errIs(t, err, ErrTokenMissingClaim, "missing exp")
@@ -381,20 +380,26 @@ func TestJWTIssuerAudience(t *testing.T) {
 	noErr(t, err, "unconstrained validation")
 }
 
-func TestJWTUnenforcedClaims(t *testing.T) {
-	// Documented gaps: sub is not required and iat is not verified.
-	// Callers must reject an empty user id themselves.
-	manager, err := NewJWT(testSecret)
+func TestJWTRequiredSubjectAndIssuedAt(t *testing.T) {
+	manager, err := NewJWT(testSecret, WithLeeway(0))
 	noErr(t, err, "NewJWT")
-
-	token := signHS256(t, testSecret, defaultHeader(), map[string]any{
-		"exp": time.Now().Add(time.Hour).Unix(),
-		"iat": time.Now().Add(24 * time.Hour).Unix(),
-	})
-	userID, claims, err := manager.ValidateToken(token)
-	noErr(t, err, "token without subject")
-	eq(t, userID, "", "empty subject accepted")
-	eq(t, len(claims), 0, "no extra claims")
+	for _, tc := range []struct {
+		claims map[string]any
+		want   error
+	}{
+		{map[string]any{"exp": time.Now().Add(time.Hour).Unix()}, ErrTokenEmptyUserID},
+		{map[string]any{"sub": "", "exp": time.Now().Add(time.Hour).Unix()}, ErrTokenEmptyUserID},
+		{map[string]any{"sub": "u", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Add(24 * time.Hour).Unix()}, ErrTokenNotYetValid},
+	} {
+		token := signHS256(t, testSecret, defaultHeader(), tc.claims)
+		for _, validate := range []func(string) (string, map[string]any, error){manager.ValidateToken, func(s string) (string, map[string]any, error) { return ValidateHS256Token(testSecret, s) }} {
+			id, claims, err := validate(token)
+			errIs(t, err, tc.want, "invalid claims")
+			if id != "" || claims != nil {
+				t.Fatal("claims returned with error")
+			}
+		}
+	}
 }
 
 func TestJWTOptionGuards(t *testing.T) {
