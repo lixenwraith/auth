@@ -1,47 +1,35 @@
 package auth
 
-import (
-	"encoding/base64"
-	"strings"
-)
+import "strings"
 
-// ParseBasicAuth extracts username/password from Basic auth header
-func ParseBasicAuth(header string) (username, password string, err error) {
-	encoded, ok := strings.CutPrefix(header, "Basic ")
-	if !ok {
-		return "", "", ErrAuthInvalidBasicFormat
+// ParseBearerToken parses an RFC 6750 Bearer authorization value. The scheme is
+// case-insensitive; tokens must use the b64token alphabet and contain no spaces.
+// Parsing does not validate the token's signature or grant authorization.
+func ParseBearerToken(header string) (string, error) {
+	// Bound before scanning, including an allowance for separator spaces.
+	if len(header) > MaxTokenLen+16 {
+		return "", ErrTokenTooLong
 	}
-
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", "", ErrAuthInvalidBasicEncoding
-	}
-
-	username, password, ok = strings.Cut(string(decoded), ":")
-	if !ok {
-		return "", "", ErrAuthInvalidBasicCreds
-	}
-
-	return username, password, nil
-}
-
-// ParseBearerToken extracts token from Bearer auth header
-func ParseBearerToken(header string) (token string, err error) {
-	token, ok := strings.CutPrefix(header, "Bearer ")
-	if !ok {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return "", ErrAuthInvalidBearerFormat
 	}
+	token = strings.TrimLeft(token, " ")
 	if token == "" {
 		return "", ErrAuthEmptyBearerToken
 	}
-
-	return token, nil
-}
-
-// ExtractAuthType returns authentication type from header
-func ExtractAuthType(header string) string {
-	if authType, _, ok := strings.Cut(header, " "); ok {
-		return authType
+	if len(token) > MaxTokenLen {
+		return "", ErrTokenTooLong
 	}
-	return "" // Matches original behavior if no space is found or string is empty
+	padding := false
+	for i, ch := range []byte(token) {
+		if ch == '=' && i > 0 {
+			padding = true
+			continue
+		}
+		if padding || !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("-._~+/", rune(ch))) {
+			return "", ErrAuthInvalidBearerFormat
+		}
+	}
+	return token, nil
 }

@@ -38,9 +38,9 @@ func TestSimpleTokenValidator(t *testing.T) {
 	v.AddToken(second)
 	eq(t, len(v.tokens), 1, "entry count after duplicate adds")
 
-	// the empty token is storable and matches only itself
+	// an empty credential must never grant access
 	v.AddToken("")
-	isTrue(t, v.ValidateToken(""), "empty token accepted once added")
+	isTrue(t, !v.ValidateToken(""), "empty token rejected")
 	v.RemoveToken("")
 	isTrue(t, !v.ValidateToken(""), "empty token removed")
 }
@@ -48,7 +48,7 @@ func TestSimpleTokenValidator(t *testing.T) {
 func TestSimpleTokenValidatorKeying(t *testing.T) {
 	v := NewSimpleTokenValidator()
 	tokens := []string{
-		"", "a", "a\x00b", "a\x00c", "🔑", strings.Repeat("a", 1<<16),
+		"a", "a\x00b", "a\x00c", "🔑", strings.Repeat("a", MaxTokenLen),
 	}
 	for _, tok := range tokens {
 		v.AddToken(tok)

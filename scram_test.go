@@ -15,6 +15,10 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+func newTestScramClient(username, password string) *ScramClient {
+	return NewScramClient(username, password, WithMinArgonCost(testArgonTime, testArgonMemory))
+}
+
 func newTestServer(t *testing.T) *ScramServer {
 	t.Helper()
 	s := NewScramServer()
@@ -36,7 +40,7 @@ func setupScram(t *testing.T) (*ScramServer, string, string, *Credential) {
 	const username, password = "testuser", "SecurePassword123"
 	cred := testCredential(t, username, password)
 	s := newTestServer(t)
-	s.AddCredential(cred)
+	noErr(t, s.AddCredential(cred), "AddCredential")
 	return s, username, password, cred
 }
 
@@ -49,7 +53,7 @@ func handshakeCount(s *ScramServer) int {
 // startHandshake drives a fresh client to the point where a proof is pending.
 func startHandshake(t *testing.T, s *ScramServer, username, password string) ClientFinalRequest {
 	t.Helper()
-	c := NewScramClient(username, password)
+	c := newTestScramClient(username, password)
 	first, err := c.StartAuthentication()
 	noErr(t, err, "StartAuthentication")
 	serverFirst, err := s.ProcessClientFirstMessage(first.Username, first.ClientNonce)
@@ -81,19 +85,19 @@ func runHandshake(s *ScramServer, c *ScramClient) error {
 
 func TestScramRoundtrip(t *testing.T) {
 	s, user, pw, _ := setupScram(t)
-	noErr(t, runHandshake(s, NewScramClient(user, pw)), "handshake")
+	noErr(t, runHandshake(s, newTestScramClient(user, pw)), "handshake")
 	eq(t, handshakeCount(s), 0, "handshake retained after success")
 }
 
 func TestScramWrongPassword(t *testing.T) {
 	s, user, _, _ := setupScram(t)
-	errIs(t, runHandshake(s, NewScramClient(user, "WrongPassword!!!")), ErrInvalidCredentials, "wrong password")
+	errIs(t, runHandshake(s, newTestScramClient(user, "WrongPassword!!!")), ErrInvalidCredentials, "wrong password")
 	eq(t, handshakeCount(s), 0, "handshake retained after failure")
 }
 
 func TestScramUnknownUser(t *testing.T) {
 	s, _, _, cred := setupScram(t)
-	c := NewScramClient("unknown_user", "any_password")
+	c := newTestScramClient("unknown_user", "any_password")
 
 	first, err := c.StartAuthentication()
 	noErr(t, err, "StartAuthentication")
@@ -151,7 +155,7 @@ func TestScramDecoySaltMultiBlock(t *testing.T) {
 	s := newTestServer(t)
 	cred := testCredential(t, "u", "SecurePassword123")
 	cred.Salt = make([]byte, 48) // exceeds one HMAC-SHA256 block
-	s.AddCredential(cred)
+	noErr(t, s.AddCredential(cred), "AddCredential")
 
 	msg, err := s.ProcessClientFirstMessage("ghost", "n")
 	noErr(t, err, "first message")
@@ -249,7 +253,7 @@ func TestScramTimeouts(t *testing.T) {
 	errIs(t, err, ErrSCRAMInvalidNonce, "expired handshake consumed")
 
 	// client-side clock
-	c := NewScramClient(user, pw)
+	c := newTestScramClient(user, pw)
 	_, err = c.StartAuthentication()
 	noErr(t, err, "StartAuthentication")
 	c.startTime = time.Now().Add(-2 * ScramHandshakeTimeout)
@@ -262,6 +266,8 @@ func TestScramTimeouts(t *testing.T) {
 	})
 	errIs(t, err, ErrSCRAMTimeout, "client timeout on server-first")
 
+	c.state = scramClientAwaitFinal
+	c.startTime = time.Now().Add(-2 * ScramHandshakeTimeout)
 	c.authMessage = "seeded"
 	c.serverKey = make([]byte, sha256.Size)
 	errIs(t, c.VerifyServerFinalMessage(ServerFinalMessage{}), ErrSCRAMTimeout, "client timeout on server-final")
@@ -349,67 +355,82 @@ func TestScramStopIdempotent(t *testing.T) {
 
 func TestScramClientState(t *testing.T) {
 	s, user, pw, _ := setupScram(t)
-	c := NewScramClient(user, pw)
-
-	errIs(t, c.VerifyServerFinalMessage(ServerFinalMessage{}), ErrSCRAMInvalidState, "unstarted client")
-
-	first, err := c.StartAuthentication()
-	noErr(t, err, "StartAuthentication")
-	serverFirst, err := s.ProcessClientFirstMessage(first.Username, first.ClientNonce)
-	noErr(t, err, "ProcessClientFirstMessage")
-	final, err := c.ProcessServerFirstMessage(serverFirst)
-	noErr(t, err, "ProcessServerFirstMessage")
-	serverFinal, err := s.ProcessClientFinalMessage(final.FullNonce, final.ClientProof)
-	noErr(t, err, "ProcessClientFinalMessage")
-
-	tampered := serverFinal
-	tampered.ServerSignature = base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
-	errIs(t, c.VerifyServerFinalMessage(tampered), ErrSCRAMServerAuthFailed, "forged signature")
-	tampered.ServerSignature = "!!!"
-	errIs(t, c.VerifyServerFinalMessage(tampered), ErrSCRAMServerAuthFailed, "malformed signature")
-	noErr(t, c.VerifyServerFinalMessage(serverFinal), "valid signature")
-
-	c.Reset()
-	errIs(t, c.VerifyServerFinalMessage(serverFinal), ErrSCRAMInvalidState, "after reset")
-	next, err := c.StartAuthentication()
-	noErr(t, err, "restart")
-	if next.ClientNonce == first.ClientNonce {
-		t.Fatal("client nonce reused after Reset")
+	c := newTestScramClient(user, pw)
+	_, err := c.ProcessServerFirstMessage(ServerFirstMessage{})
+	errIs(t, err, ErrSCRAMInvalidState, "challenge before start")
+	errIs(t, c.VerifyServerFinalMessage(ServerFinalMessage{}), ErrSCRAMInvalidState, "final before start")
+	for _, mode := range []string{"valid", "forged", "malformed", "wrong identity", "restart"} {
+		t.Run(mode, func(t *testing.T) {
+			first, err := c.StartAuthentication()
+			noErr(t, err, "start")
+			challenge, err := s.ProcessClientFirstMessage(first.Username, first.ClientNonce)
+			noErr(t, err, "challenge")
+			proof, err := c.ProcessServerFirstMessage(challenge)
+			noErr(t, err, "proof")
+			final, err := s.ProcessClientFinalMessage(proof.FullNonce, proof.ClientProof)
+			noErr(t, err, "final")
+			switch mode {
+			case "forged":
+				final.ServerSignature = base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
+			case "malformed":
+				final.ServerSignature = "!!!"
+			case "wrong identity":
+				final.Username = "other"
+			case "restart":
+				_, err := c.StartAuthentication()
+				noErr(t, err, "restart")
+			}
+			err = c.VerifyServerFinalMessage(final)
+			if mode == "valid" {
+				noErr(t, err, "valid signature")
+			} else if mode == "restart" {
+				errIs(t, err, ErrSCRAMInvalidState, "old final after restart")
+			} else {
+				errIs(t, err, ErrSCRAMServerAuthFailed, "invalid signature")
+			}
+			errIs(t, c.VerifyServerFinalMessage(final), ErrSCRAMInvalidState, "consumed state")
+			if c.serverKey != nil {
+				t.Fatal("server key retained")
+			}
+		})
 	}
 }
 
 func TestScramClientRejectsBadServerFirst(t *testing.T) {
-	c := NewScramClient("u", "SecurePassword123")
-	_, err := c.StartAuthentication()
-	noErr(t, err, "StartAuthentication")
-
-	_, err = c.ProcessServerFirstMessage(ServerFirstMessage{
-		FullNonce: "n", Salt: "!!!",
-		ArgonTime: testArgonTime, ArgonMemory: testArgonMemory, ArgonThreads: testArgonThreads,
-	})
-	errIs(t, err, ErrSCRAMInvalidSalt, "salt encoding")
-
-	// ☢ no upper bound is applied to server-supplied cost parameters
-	good := base64.StdEncoding.EncodeToString(make([]byte, 16))
-	for _, msg := range []ServerFirstMessage{
-		{FullNonce: "n", Salt: good, ArgonTime: 0, ArgonMemory: testArgonMemory, ArgonThreads: 1},
-		{FullNonce: "n", Salt: good, ArgonTime: 1, ArgonMemory: 0, ArgonThreads: 1},
-		{FullNonce: "n", Salt: good, ArgonTime: 1, ArgonMemory: testArgonMemory, ArgonThreads: 0},
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ServerFirstMessage)
+		want   error
+	}{
+		{"nonce prefix", func(m *ServerFirstMessage) { m.FullNonce = "unrelated" }, ErrSCRAMInvalidNonce},
+		{"nonce no suffix", func(m *ServerFirstMessage) { m.FullNonce = strings.TrimSuffix(m.FullNonce, "server") }, ErrSCRAMInvalidNonce},
+		{"nonce delimiter", func(m *ServerFirstMessage) { m.FullNonce += ",r=x" }, ErrSCRAMInvalidNonce},
+		{"nonce oversized", func(m *ServerFirstMessage) { m.FullNonce += strings.Repeat("x", MaxFullNonceLen) }, ErrSCRAMInvalidNonce},
+		{"salt encoding", func(m *ServerFirstMessage) { m.Salt = "!!!" }, ErrSCRAMInvalidSalt},
+		{"salt short", func(m *ServerFirstMessage) { m.Salt = base64.StdEncoding.EncodeToString(make([]byte, 15)) }, ErrSCRAMSaltTooShort},
+		{"salt oversized", func(m *ServerFirstMessage) { m.Salt = strings.Repeat("A", 10000) }, ErrSCRAMInvalidSalt},
+		{"zero time", func(m *ServerFirstMessage) { m.ArgonTime = 0 }, ErrSCRAMZeroParams},
+		{"zero threads", func(m *ServerFirstMessage) { m.ArgonThreads = 0 }, ErrSCRAMZeroParams},
+		{"low memory", func(m *ServerFirstMessage) { m.ArgonMemory = 1 }, ErrSCRAMZeroParams},
+		{"high memory", func(m *ServerFirstMessage) { m.ArgonMemory = MaxVerifyArgonMemory + 1 }, ErrSCRAMParamsTooLarge},
+		{"high work", func(m *ServerFirstMessage) { m.ArgonMemory = MaxVerifyArgonMemory; m.ArgonTime = MaxVerifyArgonTime }, ErrSCRAMParamsTooLarge},
 	} {
-		_, err = c.ProcessServerFirstMessage(msg)
-		errIs(t, err, ErrSCRAMZeroParams, "zero parameter")
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestScramClient("u", "SecurePassword123")
+			first, err := c.StartAuthentication()
+			noErr(t, err, "start")
+			msg := ServerFirstMessage{FullNonce: first.ClientNonce + "server", Salt: base64.StdEncoding.EncodeToString(make([]byte, 16)), ArgonTime: testArgonTime, ArgonMemory: testArgonMemory, ArgonThreads: testArgonThreads}
+			tc.mutate(&msg)
+			_, err = c.ProcessServerFirstMessage(msg)
+			errIs(t, err, tc.want, tc.name)
+			_, err = c.ProcessServerFirstMessage(msg)
+			errIs(t, err, ErrSCRAMInvalidState, "failure consumed state")
+		})
 	}
-
-	// A hostile server cannot dictate an unbounded KDF
-	_, err = c.ProcessServerFirstMessage(ServerFirstMessage{
-		FullNonce: "n", Salt: good,
-		ArgonTime: 1, ArgonMemory: MaxVerifyArgonMemory + 1, ArgonThreads: 1,
-	})
-	errIs(t, err, ErrSCRAMParamsTooLarge, "memory over ceiling")
 }
 
 func TestScramClientOversizedPassword(t *testing.T) {
-	c := NewScramClient("u", strings.Repeat("a", MaxPasswordLen+1))
+	c := newTestScramClient("u", strings.Repeat("a", MaxPasswordLen+1))
 	_, err := c.StartAuthentication()
 	errIs(t, err, ErrPasswordTooLong, "oversized password rejected before the KDF")
 }
@@ -432,8 +453,8 @@ func TestScramMigratedNonStandardDigest(t *testing.T) {
 	eq(t, len(cred.StoredKey), sha256.Size, "stored key length")
 
 	s := newTestServer(t)
-	s.AddCredential(cred)
-	noErr(t, runHandshake(s, NewScramClient(user, pw)), "handshake with migrated credential")
+	noErr(t, s.AddCredential(cred), "AddCredential")
+	noErr(t, runHandshake(s, newTestScramClient(user, pw)), "handshake with migrated credential")
 }
 
 func TestDeriveCredential(t *testing.T) {
@@ -515,8 +536,8 @@ func TestCredentialExportImportRoundTrip(t *testing.T) {
 
 	// an imported credential must still authenticate
 	s := newTestServer(t)
-	s.AddCredential(imported)
-	noErr(t, runHandshake(s, NewScramClient("roundtrip", "SecurePassword123")), "handshake after import")
+	noErr(t, s.AddCredential(imported), "AddCredential")
+	noErr(t, runHandshake(s, newTestScramClient("roundtrip", "SecurePassword123")), "handshake after import")
 }
 
 func TestImportCredentialErrors(t *testing.T) {
@@ -590,7 +611,7 @@ func TestScramConcurrentSameUser(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- runHandshake(s, NewScramClient(user, pw))
+			errs <- runHandshake(s, newTestScramClient(user, pw))
 		}()
 	}
 	wg.Wait()
@@ -616,7 +637,7 @@ func TestScramConcurrentMixedTraffic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.AddCredential(cred)
+			noErr(t, s.AddCredential(cred), "AddCredential")
 		}()
 	}
 	for i := range 16 {
@@ -677,10 +698,12 @@ func BenchmarkScramHandshake(b *testing.B) {
 	}
 	s := NewScramServer()
 	defer s.Stop()
-	s.AddCredential(cred)
+	if err := s.AddCredential(cred); err != nil {
+		b.Fatal(err)
+	}
 
 	for b.Loop() {
-		c := NewScramClient(user, pw)
+		c := newTestScramClient(user, pw)
 		first, err := c.StartAuthentication()
 		if err != nil {
 			b.Fatal(err)
