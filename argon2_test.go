@@ -214,9 +214,8 @@ func TestValidatePHCHashFormat(t *testing.T) {
 		{"digest at cap", std(params, okSalt, rawB64(MaxArgonKeyLen)), nil},
 		{"digest over cap", std(params, okSalt, rawB64(MaxArgonKeyLen+1)), ErrPHCInvalidHash},
 
-		// encoding/base64 discards CR and LF, so PHC records are not
-		// byte-canonical: never compare them as strings.
-		{"digest with newline", std(params, okSalt, okDigest[:20]+"\n"+okDigest[20:]), nil},
+		// Canonical PHC fields cannot contain whitespace.
+		{"digest with newline", std(params, okSalt, okDigest[:20]+"\n"+okDigest[20:]), ErrPHCInvalidHash},
 	}
 
 	for _, tc := range cases {
@@ -287,22 +286,14 @@ func TestMigrateFromPHC(t *testing.T) {
 }
 
 func TestMigrateFromPHCShortSalt(t *testing.T) {
-	// parsePHC accepts 8..64 byte salts; SCRAM requires >= 16. The 32-byte
-	// digest branch skips that check, the fallback branch enforces it.
-	// See the ‼️ note on MigrateFromPHC.
 	const pw = "testPassword123"
-	salt := []byte("12345678")
-
-	cred, err := MigrateFromPHC("u", pw, phcFor(pw, salt, DefaultArgonKeyLen))
-	noErr(t, err, "32-byte digest branch")
-	eq(t, len(cred.Salt), 8, "short salt retained")
-
-	// the credential it produced cannot survive an export/import cycle
-	_, err = ImportCredential(cred.Export())
-	errIs(t, err, ErrSCRAMSaltTooShort, "re-import")
-
-	_, err = MigrateFromPHC("u", pw, phcFor(pw, salt, 20))
-	errIs(t, err, ErrSCRAMSaltTooShort, "fallback branch")
+	for _, keyLen := range []uint32{20, DefaultArgonKeyLen} {
+		cred, err := MigrateFromPHC("u", pw, phcFor(pw, []byte("12345678"), keyLen))
+		errIs(t, err, ErrSCRAMSaltTooShort, "short migration salt")
+		if cred != nil {
+			t.Fatal("invalid credential returned")
+		}
+	}
 }
 
 func TestConcurrentPasswordOperations(t *testing.T) {
@@ -384,7 +375,7 @@ func FuzzVerifyPassword(f *testing.F) {
 		// parsePHC admits m up to 4 GiB from untrusted input; clamp before
 		// letting the fuzzer choose the KDF cost.
 		if r, err := parsePHC(hash); err == nil &&
-			(r.memory > 64*1024 || r.time > 4 || r.threads > 8) {
+			(r.memory > testArgonMemory || r.time > testArgonTime || r.threads > testArgonThreads) {
 			return
 		}
 		_ = VerifyPassword(password, hash)
