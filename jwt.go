@@ -261,49 +261,6 @@ func mapJWTError(err error) error {
 	}
 }
 
-// GenerateHS256Token creates HS256 JWT without manager instance
-func GenerateHS256Token(secret []byte, userID string, claims map[string]any, lifetime time.Duration) (string, error) {
-	if len(secret) < 32 {
-		return "", ErrSecretTooShort
-	}
-	if userID == "" {
-		return "", ErrTokenEmptyUserID
-	}
-
-	now := time.Now()
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, customClaims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(lifetime)),
-		},
-		Extra: claims,
-	})
-
-	signed, err := token.SignedString(secret)
-	if len(signed) > MaxTokenLen {
-		return "", ErrTokenTooLong
-	}
-	return signed, err
-}
-
-// ValidateHS256Token is the legacy unscoped HS256 adapter. It requires exp/sub
-// and validates iat/nbf with DefaultLeeway, but does not constrain issuer/audience.
-// Prefer a reusable JWT with explicit issuer/audience for new services.
-func ValidateHS256Token(secret []byte, tokenString string) (string, map[string]any, error) {
-	if len(secret) < 32 {
-		return "", nil, ErrSecretTooShort
-	}
-
-	return validateJWT(standaloneHS256Parser, secret, tokenString)
-}
-
-var standaloneHS256Parser = jwt.NewParser(
-	jwt.WithValidMethods([]string{"HS256"}), jwt.WithLeeway(DefaultLeeway),
-	jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithStrictDecoding(),
-)
-
 func validateRSAPublicKey(key *rsa.PublicKey) error {
 	if key.N == nil || key.N.Sign() <= 0 || key.N.Bit(0) == 0 || key.E < 3 || key.E&1 == 0 || key.E > 1<<31-1 {
 		return ErrRSAInvalidPublicKey

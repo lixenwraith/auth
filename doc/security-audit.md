@@ -53,6 +53,22 @@ base64, oversized tokens, and KDF parameters above the new budget. Short-salt PH
 records must be re-enrolled before SCRAM migration. A server's profile remains
 fixed after removing its last credential to keep decoy responses stable.
 
+### Follow-up: legacy HS256 adapter removal (v0.5.0, 2026-09-26)
+
+Chess was the only consumer of `GenerateHS256Token` and `ValidateHS256Token`.
+It now constructs a scoped `NewJWT` manager (issuer `chess-server`, audience
+`chess-api`, lifetime equal to its session TTL, zero leeway) and parses headers
+with `ParseBearerToken`. The adapters, their shared unscoped parser, their tests,
+and the `FuzzValidateHS256Token` target were removed; `FuzzValidateToken` now
+fuzzes a scoped manager. The unused `ErrSaltGenerationFailed` was also removed:
+`crypto/rand.Read` cannot return an error on supported Go versions, so no path
+produced it. `HashPassword`, `VerifyPassword`, and `ValidatePHCHashFormat` are
+general password APIs and remain unchanged.
+
+Removing the adapters is a breaking API change for any out-of-tree caller. The
+five-minute default leeway of `NewJWT` itself is unchanged for compatibility;
+services should still set `WithLeeway` explicitly.
+
 ## Integration boundaries
 
 - **Transport:** this Argon2/JSON protocol is not standard SASL SCRAM-SHA-256 and
@@ -80,9 +96,8 @@ fixed after removing its last credential to keep decoy responses stable.
 `HashPassword` followed by `MigrateFromPHC` performs two. Existing PHC migration
 continues to reuse its verification KDF for the normal 32-byte digest.
 
-JWT managers now construct their immutable parser once, and the legacy HS256
-helper shares a parser. No password-strength defaults were reduced. RSA key
-validation/copying occurs at construction. The server's proof path performs
+JWT managers now construct their immutable parser once. No password-strength
+defaults were reduced. RSA key validation/copying occurs at construction. The server's proof path performs
 bounded hash/HMAC operations, with no Argon2 work.
 
 On Go 1.27.1/linux-amd64, three local benchmark samples measured direct

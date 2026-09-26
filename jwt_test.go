@@ -145,11 +145,6 @@ func TestJWTSecretLength(t *testing.T) {
 	errIs(t, err, ErrSecretTooShort, "31 bytes")
 	_, err = NewJWT(make([]byte, 32))
 	noErr(t, err, "32 bytes")
-
-	_, err = GenerateHS256Token(make([]byte, 31), "u", nil, time.Hour)
-	errIs(t, err, ErrSecretTooShort, "standalone generate")
-	_, _, err = ValidateHS256Token(make([]byte, 31), "irrelevant")
-	errIs(t, err, ErrSecretTooShort, "standalone validate")
 }
 
 func TestJWTEmptyUserID(t *testing.T) {
@@ -157,8 +152,6 @@ func TestJWTEmptyUserID(t *testing.T) {
 	noErr(t, err, "NewJWT")
 	_, err = manager.GenerateToken("", map[string]any{"role": "admin"})
 	errIs(t, err, ErrTokenEmptyUserID, "empty user id")
-	_, err = GenerateHS256Token(testSecret, "", nil, time.Hour)
-	errIs(t, err, ErrTokenEmptyUserID, "standalone empty user id")
 }
 
 func TestJWTRS256(t *testing.T) {
@@ -392,12 +385,10 @@ func TestJWTRequiredSubjectAndIssuedAt(t *testing.T) {
 		{map[string]any{"sub": "u", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Add(24 * time.Hour).Unix()}, ErrTokenNotYetValid},
 	} {
 		token := signHS256(t, testSecret, defaultHeader(), tc.claims)
-		for _, validate := range []func(string) (string, map[string]any, error){manager.ValidateToken, func(s string) (string, map[string]any, error) { return ValidateHS256Token(testSecret, s) }} {
-			id, claims, err := validate(token)
-			errIs(t, err, tc.want, "invalid claims")
-			if id != "" || claims != nil {
-				t.Fatal("claims returned with error")
-			}
+		id, claims, err := manager.ValidateToken(token)
+		errIs(t, err, tc.want, "invalid claims")
+		if id != "" || claims != nil {
+			t.Fatal("claims returned with error")
 		}
 	}
 }
@@ -420,38 +411,22 @@ func TestJWTOptionGuards(t *testing.T) {
 	eq(t, verifier.leeway, time.Minute, "leeway")
 }
 
-func TestJWTStandaloneFunctions(t *testing.T) {
-	token, err := GenerateHS256Token(testSecret, "standalone-user",
-		map[string]any{"test": "value", "count": 42}, time.Hour)
-	noErr(t, err, "GenerateHS256Token")
+func TestJWTClaimsRoundTrip(t *testing.T) {
+	manager, err := NewJWT(testSecret, WithLeeway(0))
+	noErr(t, err, "NewJWT")
+	token, err := manager.GenerateToken("user", map[string]any{"test": "value", "count": 42})
+	noErr(t, err, "GenerateToken")
 
-	userID, claims, err := ValidateHS256Token(testSecret, token)
-	noErr(t, err, "ValidateHS256Token")
-	eq(t, userID, "standalone-user", "user id")
+	userID, claims, err := manager.ValidateToken(token)
+	noErr(t, err, "ValidateToken")
+	eq(t, userID, "user", "user id")
 	eq(t, str(t, claims, "test"), "value", "string claim")
 	eq(t, claims["count"], any(float64(42)), "numeric claim after JSON round trip")
 
-	_, _, err = ValidateHS256Token(bytes.Repeat([]byte("x"), 32), token)
+	other, err := NewJWT(bytes.Repeat([]byte("x"), 32))
+	noErr(t, err, "NewJWT other key")
+	_, _, err = other.ValidateToken(token)
 	errIs(t, err, ErrTokenInvalidSignature, "wrong secret")
-
-	expired, err := GenerateHS256Token(testSecret, "u", nil, -time.Hour)
-	noErr(t, err, "expired token")
-	_, _, err = ValidateHS256Token(testSecret, expired)
-	errIs(t, err, ErrTokenExpired, "expired beyond default leeway")
-
-	// standalone validation checks neither issuer nor audience
-	scoped, err := NewJWT(testSecret, WithIssuer("iss"), WithAudience([]string{"aud"}))
-	noErr(t, err, "NewJWT scoped")
-	scopedToken, err := scoped.GenerateToken("u", nil)
-	noErr(t, err, "GenerateToken scoped")
-	_, _, err = ValidateHS256Token(testSecret, scopedToken)
-	noErr(t, err, "issuer and audience are not enforced standalone")
-
-	// tokens are interchangeable with the manager form
-	managed, err := NewJWT(testSecret)
-	noErr(t, err, "NewJWT")
-	_, _, err = managed.ValidateToken(token)
-	noErr(t, err, "standalone token accepted by manager")
 }
 
 func TestJWTPEM(t *testing.T) {
@@ -564,8 +539,12 @@ func TestJWTConcurrency(t *testing.T) {
 	}
 }
 
-func FuzzValidateHS256Token(f *testing.F) {
-	token, err := GenerateHS256Token(testSecret, "seed", map[string]any{"a": 1}, time.Hour)
+func FuzzValidateToken(f *testing.F) {
+	manager, err := NewJWT(testSecret, WithIssuer("iss"), WithAudience([]string{"aud"}))
+	if err != nil {
+		f.Fatal(err)
+	}
+	token, err := manager.GenerateToken("seed", map[string]any{"a": 1})
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -575,7 +554,7 @@ func FuzzValidateHS256Token(f *testing.F) {
 	f.Add(strings.Repeat(".", 16))
 
 	f.Fuzz(func(t *testing.T, s string) {
-		_, _, err := ValidateHS256Token(testSecret, s)
+		_, _, err := manager.ValidateToken(s)
 		if err != nil {
 			return
 		}

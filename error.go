@@ -87,8 +87,3 @@ var (
 	ErrAuthInvalidBearerFormat = errors.New("auth: invalid Bearer auth format")
 	ErrAuthEmptyBearerToken    = errors.New("auth: empty Bearer token")
 )
-
-// Salt generation errors
-var (
-	ErrSaltGenerationFailed = errors.New("failed to generate salt")
-)

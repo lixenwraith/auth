@@ -12,8 +12,7 @@
 //
 // NewJWT and NewJWTRSA create reusable, concurrent token managers. Configure an
 // issuer and audience for each service. ValidateToken requires expiration and a
-// nonempty subject; it returns only the nested "extra" application claims. The
-// one-off HS256 helpers retain their existing API for consumers such as chess.
+// nonempty subject; it returns only the nested "extra" application claims.
 //
 // See the README and doc/security-audit.md for limits, migration, transport
 // requirements, persistence, and deployment guidance.

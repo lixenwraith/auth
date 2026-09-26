@@ -22,6 +22,6 @@ jobs:
           GOMAXPROCS: '2'
         run: |
           set -eu
-          for target in FuzzParsePHC FuzzVerifyPassword FuzzImportCredential FuzzValidateHS256Token FuzzParseBearerToken FuzzScramServerMessages FuzzScramClientMessages; do
+          for target in FuzzParsePHC FuzzVerifyPassword FuzzImportCredential FuzzValidateToken FuzzParseBearerToken FuzzScramServerMessages FuzzScramClientMessages; do
             go test -run '^$' -fuzz "^${target}$" -fuzztime=10s -parallel=2
           done

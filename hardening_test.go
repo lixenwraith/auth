@@ -221,8 +221,6 @@ func TestJWTBoundedCanonicalEncoding(t *testing.T) {
 	for _, bad := range []string{token + "\n", malleated, strings.Repeat("x", MaxTokenLen+1)} {
 		_, _, err = j.ValidateToken(bad)
 		hasErr(t, err, "malformed/oversized token")
-		_, _, err = ValidateHS256Token(testSecret, bad)
-		hasErr(t, err, "standalone malformed/oversized")
 	}
 	header := defaultHeader()
 	header["crit"] = []string{"custom"}

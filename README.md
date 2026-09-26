@@ -142,11 +142,13 @@ check a persisted session or a revocation policy when immediate revocation is
 required. Do not place passwords, credential keys, or secrets in JWT claims;
 JWT payloads are readable by the holder.
 
-`GenerateHS256Token` and `ValidateHS256Token` retain chess's API and `extra` JSON
-shape. The validator shares the hardened validation path, but intentionally
-retains the legacy five-minute leeway and no issuer/audience constraint. Prefer
-a configured manager for new integrations. Existing chess hashing and CLI PHC
-validation functions also retain their signatures.
+The unscoped one-off helpers `GenerateHS256Token` and `ValidateHS256Token` were
+removed in v0.5.0; their only consumer (chess) now uses a scoped manager. Migrate
+by constructing one `NewJWT` manager with an explicit issuer, audience, lifetime,
+and leeway, then calling `GenerateToken`/`ValidateToken`. Application claims keep
+the same nested `extra` JSON shape. Tokens minted by the removed helpers carry no
+issuer/audience and are rejected by a scoped manager, so rotate sessions (users
+sign in again) when switching.
 
 ## Opaque tokens and HTTP
 
@@ -190,7 +192,7 @@ go test -race -count=1 ./...
 go test -run '^$' -bench . -benchmem
 
 # Run each target separately; keep worker count bounded for KDF fuzzing.
-for target in FuzzParsePHC FuzzVerifyPassword FuzzImportCredential FuzzValidateHS256Token FuzzParseBearerToken FuzzScramServerMessages FuzzScramClientMessages; do
+for target in FuzzParsePHC FuzzVerifyPassword FuzzImportCredential FuzzValidateToken FuzzParseBearerToken FuzzScramServerMessages FuzzScramClientMessages; do
     GOMAXPROCS=2 go test -run '^$' -fuzz "^${target}$" -fuzztime=60s -parallel=2
 done
 ```
