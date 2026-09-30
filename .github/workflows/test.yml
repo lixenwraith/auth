@@ -1,27 +1,66 @@
-name: test
+name: Test and Fuzz
+
 on:
   push:
-    branches: [main]
+    branches: [ main, master, develop, 'claude/*' ]
   pull_request:
+    branches: [ main, master, develop ]
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   test:
+    name: Build, Test, and Fuzz
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: '1.26.x'
-      - run: go vet ./...
-      - run: go test -race -count=1 ./...
-      - name: Bounded fuzz smoke tests
-        env:
-          GOMAXPROCS: '2'
-        run: |
-          set -eu
-          for target in FuzzParsePHC FuzzVerifyPassword FuzzImportCredential FuzzValidateToken FuzzParseBearerToken FuzzScramServerMessages FuzzScramClientMessages; do
-            go test -run '^$' -fuzz "^${target}$" -fuzztime=10s -parallel=2
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.27.1'
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Vet code
+      run: go vet ./...
+
+    - name: Build code
+      run: go build ./...
+
+    - name: Run tests with race detector
+      run: go test -race -v -count=1 ./...
+      env:
+        # Halt immediately on race condition and output logs to files prefixed with "race"
+        GORACE: "halt_on_error=1 log_path=race"
+
+    - name: Upload race detector logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: race-detector-logs
+        path: race.*
+        retention-days: 7
+
+    - name: Dynamic Bounded Fuzz Smoke Tests
+      env:
+        GOMAXPROCS: '2'
+      run: |
+        set -eu
+        # Loop over all packages in the module
+        go list ./... | while read -r pkg; do
+          # Dynamically find all fuzz targets in the current package
+          targets=$(go test -list '^Fuzz' "$pkg" | grep '^Fuzz' || true)
+          
+          for target in $targets; do
+            echo "Running fuzz test: $target in $pkg"
+            go test -run '^$' -fuzz "^${target}$" -fuzztime=10s -parallel=2 "$pkg"
           done
+        done
