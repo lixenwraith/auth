@@ -195,6 +195,57 @@ func TestScramProofBinding(t *testing.T) {
 	noErr(t, err, "handshake b unaffected")
 }
 
+// The binding enters both AuthMessages, so peers authenticate only when they
+// derive identical bytes; a one-sided binding fails instead of downgrading.
+func TestScramChannelBinding(t *testing.T) {
+	a, b := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	cases := []struct {
+		name           string
+		client, server []ExchangeOption
+		ok             bool
+	}{
+		{"matching", []ExchangeOption{WithChannelBinding(a)}, []ExchangeOption{WithChannelBinding(a)}, true},
+		{"mismatched", []ExchangeOption{WithChannelBinding(a)}, []ExchangeOption{WithChannelBinding(b)}, false},
+		{"client only", []ExchangeOption{WithChannelBinding(a)}, nil, false},
+		{"server only", nil, []ExchangeOption{WithChannelBinding(a)}, false},
+	}
+	s, user, pw, _ := setupScram(t)
+	for _, tc := range cases {
+		c := newTestScramClient(user, pw)
+		first, err := c.StartAuthentication()
+		noErr(t, err, tc.name+": start")
+		challenge, err := s.ProcessClientFirstMessage(first.Username, first.ClientNonce)
+		noErr(t, err, tc.name+": client first")
+		proof, err := c.ProcessServerFirstMessage(challenge, tc.client...)
+		noErr(t, err, tc.name+": server first")
+		final, err := s.ProcessClientFinalMessage(proof.FullNonce, proof.ClientProof, tc.server...)
+		if !tc.ok {
+			errIs(t, err, ErrInvalidCredentials, tc.name)
+			continue
+		}
+		noErr(t, err, tc.name+": client final")
+		noErr(t, c.VerifyServerFinalMessage(final), tc.name+": server final")
+	}
+}
+
+// An empty or oversized binding is a caller bug: both sides refuse it before
+// touching exchange state rather than treating it as "unbound".
+func TestScramChannelBindingLength(t *testing.T) {
+	s, user, pw, _ := setupScram(t)
+	for _, cb := range [][]byte{nil, {}, make([]byte, MaxChannelBindingLen+1)} {
+		c := newTestScramClient(user, pw)
+		first, err := c.StartAuthentication()
+		noErr(t, err, "start")
+		challenge, err := s.ProcessClientFirstMessage(first.Username, first.ClientNonce)
+		noErr(t, err, "client first")
+		_, err = s.ProcessClientFinalMessage(challenge.FullNonce, "", WithChannelBinding(cb))
+		errIs(t, err, ErrSCRAMChannelBinding, "server binding length")
+		_, err = c.ProcessServerFirstMessage(challenge, WithChannelBinding(cb))
+		errIs(t, err, ErrSCRAMChannelBinding, "client binding length")
+	}
+	eq(t, handshakeCount(s), 3, "server consumed a handshake on a binding error")
+}
+
 func TestScramProofEncoding(t *testing.T) {
 	s, user, pw, _ := setupScram(t)
 

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -34,6 +35,8 @@ const (
 	MaxUsernameLen     = 256
 	MaxClientNonceLen  = 256
 	MaxFullNonceLen    = 512
+	// MaxChannelBindingLen fits a SHA-512 certificate hash or an RFC 9266 exporter
+	MaxChannelBindingLen = 64
 )
 
 // Credential stores SCRAM authentication data
@@ -442,8 +445,13 @@ func (s *ScramServer) ProcessClientFirstMessage(username, clientNonce string) (S
 	}, nil
 }
 
-// ProcessClientFinalMessage verifies client proof
-func (s *ScramServer) ProcessClientFinalMessage(fullNonce, clientProof string) (ServerFinalMessage, error) {
+// ProcessClientFinalMessage verifies client proof. A channel binding, when
+// given, must equal the client's; an unbound and a bound peer never agree.
+func (s *ScramServer) ProcessClientFinalMessage(fullNonce, clientProof string, opts ...ExchangeOption) (ServerFinalMessage, error) {
+	binding, err := exchangeBinding(opts)
+	if err != nil {
+		return ServerFinalMessage{}, err
+	}
 	if !validNonce(fullNonce, MaxFullNonceLen) {
 		return ServerFinalMessage{}, ErrSCRAMInvalidNonce
 	}
@@ -494,7 +502,7 @@ func (s *ScramServer) ProcessClientFinalMessage(fullNonce, clientProof string) (
 		ArgonMemory:  state.Credential.ArgonMemory,
 		ArgonThreads: state.Credential.ArgonThreads,
 	}
-	clientFinalBare := fmt.Sprintf("r=%s", fullNonce)
+	clientFinalBare := binding + "r=" + fullNonce
 	authMessage := clientFirstBare + "," + serverFirst.Marshal() + "," + clientFinalBare
 
 	// Compute client signature
@@ -662,13 +670,19 @@ func (c *ScramClient) StartAuthentication() (ClientFirstRequest, error) {
 	}, nil
 }
 
-// ProcessServerFirstMessage handles server challenge
-func (c *ScramClient) ProcessServerFirstMessage(msg ServerFirstMessage) (result ClientFinalRequest, err error) {
+// ProcessServerFirstMessage handles server challenge. Pass the same channel
+// binding the server uses; the binding is learned only after the transport
+// connects, which is why it is supplied here rather than at construction.
+func (c *ScramClient) ProcessServerFirstMessage(msg ServerFirstMessage, opts ...ExchangeOption) (result ClientFinalRequest, err error) {
 	defer func() {
 		if err != nil {
 			c.Reset()
 		}
 	}()
+	binding, err := exchangeBinding(opts)
+	if err != nil {
+		return ClientFinalRequest{}, err
+	}
 	if c.state != scramClientAwaitChallenge {
 		return ClientFinalRequest{}, ErrSCRAMInvalidState
 	}
@@ -707,7 +721,7 @@ func (c *ScramClient) ProcessServerFirstMessage(msg ServerFirstMessage) (result 
 
 	// Build auth message
 	clientFirstBare := fmt.Sprintf("u=%s,n=%s", c.handshakeUsername, c.clientNonce)
-	clientFinalBare := fmt.Sprintf("r=%s", msg.FullNonce)
+	clientFinalBare := binding + "r=" + msg.FullNonce
 	c.authMessage = clientFirstBare + "," + msg.Marshal() + "," + clientFinalBare
 
 	// Compute client proof
@@ -767,6 +781,43 @@ func (c *ScramClient) Reset() {
 	clear(c.serverKey)
 	c.serverKey = nil
 	c.startTime = time.Time{}
+}
+
+// ExchangeOption configures the proof step of one exchange, on either side.
+type ExchangeOption func(*exchangeOptions)
+
+type exchangeOptions struct {
+	binding []byte
+	bound   bool
+}
+
+// WithChannelBinding commits the proof to transport bytes both peers derive
+// identically, e.g. SHA-256 of the server's leaf certificate (RFC 5929 style)
+// or an RFC 9266 TLS exporter. A relay terminating TLS with any other
+// certificate then fails the proof. Length must be 1..MaxChannelBindingLen.
+func WithChannelBinding(data []byte) ExchangeOption {
+	return func(o *exchangeOptions) {
+		o.binding, o.bound = bytes.Clone(data), true
+	}
+}
+
+// exchangeBinding renders the client-final-bare prefix. An empty binding is an
+// error rather than "unbound", so a caller bug cannot silently downgrade.
+// Commas cannot occur in base64 or nonces, so the two forms never collide.
+func exchangeBinding(opts []ExchangeOption) (string, error) {
+	var o exchangeOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	if !o.bound {
+		return "", nil
+	}
+	if len(o.binding) == 0 || len(o.binding) > MaxChannelBindingLen {
+		return "", ErrSCRAMChannelBinding
+	}
+	return "c=" + base64.StdEncoding.EncodeToString(o.binding) + ",", nil
 }
 
 // SCRAM message types
