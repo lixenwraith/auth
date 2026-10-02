@@ -11,6 +11,7 @@ func FuzzScramServerMessages(f *testing.F) {
 	f.Add("unknown", "nonce", base64.StdEncoding.EncodeToString(make([]byte, 32)), []byte(nil))
 	f.Add("", "", "", []byte{})
 	f.Add("a,n=b", "nonce", "!!!", make([]byte, 32))
+	f.Add("unknown", "nonce", base64.StdEncoding.EncodeToString(make([]byte, 32)), make([]byte, MaxChannelBindingLen))
 	f.Fuzz(func(t *testing.T, username, nonce, proof string, binding []byte) {
 		var opts []ExchangeOption
 		if len(binding) > 0 && len(binding) <= MaxChannelBindingLen {

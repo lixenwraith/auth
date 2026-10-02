@@ -784,6 +784,7 @@ func (c *ScramClient) Reset() {
 }
 
 // ExchangeOption configures the proof step of one exchange, on either side.
+// Nil options are ignored; a repeated WithChannelBinding keeps the last one.
 type ExchangeOption func(*exchangeOptions)
 
 type exchangeOptions struct {
