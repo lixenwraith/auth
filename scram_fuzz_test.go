@@ -8,16 +8,20 @@ import (
 func FuzzScramServerMessages(f *testing.F) {
 	s := NewScramServer()
 	f.Cleanup(s.Stop)
-	f.Add("unknown", "nonce", base64.StdEncoding.EncodeToString(make([]byte, 32)))
-	f.Add("", "", "")
-	f.Add("a,n=b", "nonce", "!!!")
-	f.Fuzz(func(t *testing.T, username, nonce, proof string) {
+	f.Add("unknown", "nonce", base64.StdEncoding.EncodeToString(make([]byte, 32)), []byte(nil))
+	f.Add("", "", "", []byte{})
+	f.Add("a,n=b", "nonce", "!!!", make([]byte, 32))
+	f.Fuzz(func(t *testing.T, username, nonce, proof string, binding []byte) {
+		var opts []ExchangeOption
+		if len(binding) > 0 && len(binding) <= MaxChannelBindingLen {
+			opts = append(opts, WithChannelBinding(binding))
+		}
 		first, err := s.ProcessClientFirstMessage(username, nonce)
 		if err != nil {
 			return
 		}
 		// No credential is registered, so even syntactically valid proofs fail.
-		_, err = s.ProcessClientFinalMessage(first.FullNonce, proof)
+		_, err = s.ProcessClientFinalMessage(first.FullNonce, proof, opts...)
 		if err == nil {
 			t.Fatal("unknown account authenticated")
 		}

@@ -65,6 +65,7 @@ var (
 	ErrSCRAMStopped           = errors.New("scram: server stopped")
 	ErrSCRAMDecoyKey          = errors.New("scram: decoy key must be at least 32 bytes")
 	ErrSCRAMCredentialProfile = errors.New("scram: credentials must share Argon2 parameters and salt length")
+	ErrSCRAMChannelBinding    = errors.New("scram: channel binding must be 1-64 bytes")
 )
 
 // Credential import/export errors
