@@ -60,6 +60,11 @@ never agree, so there is no silent downgrade; an empty or oversized (>64 bytes)
 binding returns `ErrSCRAMChannelBinding`. A mismatch is reported as
 `ErrInvalidCredentials`, like a wrong password. When later requests travel on
 new connections (HTTP), the client must also pin the bound certificate on them.
+Nil options are ignored; a repeated `WithChannelBinding` keeps the last one.
+
+v0.5.0 added the variadic `...ExchangeOption` parameter to both methods. Calls
+compile unchanged; interfaces or method values declaring the old signatures must
+be updated.
 
 Check every error and abort the exchange on failure. Only a successful **server
 final** authenticates a user; use its `Username`, never a separate identity from
