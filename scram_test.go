@@ -198,13 +198,14 @@ func TestScramProofBinding(t *testing.T) {
 // The binding enters both AuthMessages, so peers authenticate only when they
 // derive identical bytes; a one-sided binding fails instead of downgrading.
 func TestScramChannelBinding(t *testing.T) {
-	a, b := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	a, b, max := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, MaxChannelBindingLen)
 	cases := []struct {
 		name           string
 		client, server []ExchangeOption
 		ok             bool
 	}{
 		{"matching", []ExchangeOption{WithChannelBinding(a)}, []ExchangeOption{WithChannelBinding(a)}, true},
+		{"matching at the 64-byte limit", []ExchangeOption{WithChannelBinding(max)}, []ExchangeOption{WithChannelBinding(max)}, true},
 		{"mismatched", []ExchangeOption{WithChannelBinding(a)}, []ExchangeOption{WithChannelBinding(b)}, false},
 		{"client only", []ExchangeOption{WithChannelBinding(a)}, nil, false},
 		{"server only", nil, []ExchangeOption{WithChannelBinding(a)}, false},
@@ -228,8 +229,35 @@ func TestScramChannelBinding(t *testing.T) {
 	}
 }
 
-// An empty or oversized binding is a caller bug: both sides refuse it before
-// touching exchange state rather than treating it as "unbound".
+// Known-answer proofs pin the AuthMessage wire format: the unbound value is the
+// one v0.4.1 produced, so older peers keep interoperating, and the bound form
+// cannot drift while both sides change in step.
+func TestScramProofKnownAnswers(t *testing.T) {
+	msg := ServerFirstMessage{
+		FullNonce: "client-nonce" + "server-nonce", Salt: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 16)),
+		ArgonTime: 1, ArgonMemory: 8, ArgonThreads: 1,
+	}
+	for _, tc := range []struct {
+		name string
+		opts []ExchangeOption
+		want string
+	}{
+		{"unbound", nil, "JCVOdKAYwVu3YZx+6nfRfBUcnsTCgydOchnQq1G7Ry0="},
+		{"bound", []ExchangeOption{WithChannelBinding(bytes.Repeat([]byte{9}, 32))}, "uhfWaHDQ4yUIcY3qWbaFhBBXWO+HtBlujy7z9u92a20="},
+	} {
+		c := NewScramClient("alice", "password123", WithMinArgonCost(1, 8))
+		_, err := c.StartAuthentication()
+		noErr(t, err, tc.name+": start")
+		c.clientNonce = "client-nonce"
+		proof, err := c.ProcessServerFirstMessage(msg, tc.opts...)
+		noErr(t, err, tc.name)
+		eq(t, proof.ClientProof, tc.want, tc.name+": proof")
+	}
+}
+
+// An empty or oversized binding is a caller bug, refused rather than treated as
+// "unbound". The server keeps its handshake; the client is consumed, as on any
+// client error.
 func TestScramChannelBindingLength(t *testing.T) {
 	s, user, pw, _ := setupScram(t)
 	for _, cb := range [][]byte{nil, {}, make([]byte, MaxChannelBindingLen+1)} {
@@ -242,6 +270,8 @@ func TestScramChannelBindingLength(t *testing.T) {
 		errIs(t, err, ErrSCRAMChannelBinding, "server binding length")
 		_, err = c.ProcessServerFirstMessage(challenge, WithChannelBinding(cb))
 		errIs(t, err, ErrSCRAMChannelBinding, "client binding length")
+		_, err = c.ProcessServerFirstMessage(challenge, WithChannelBinding([]byte{1}))
+		errIs(t, err, ErrSCRAMInvalidState, "client state survived a binding error")
 	}
 	eq(t, handshakeCount(s), 3, "server consumed a handshake on a binding error")
 }
