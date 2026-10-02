@@ -7,9 +7,9 @@ hashing, Argon2-SCRAM, HS256/RS256 JWTs, and opaque token validation.
 
 This is a **package-specific JSON challenge/response protocol using Argon2id and
 HMAC-SHA256**, not standard SASL SCRAM-SHA-256. Both peers must implement this
-protocol. It does not implement SASLprep or TLS channel binding. Use authenticated
-TLS (HTTPS/WSS for HTTP/WebSocket transports), including server certificate and
-hostname verification. SCRAM does not encrypt subsequent application traffic.
+protocol. It does not implement SASLprep. Use authenticated TLS (HTTPS/WSS for
+HTTP/WebSocket transports), including server certificate and hostname
+verification. SCRAM does not encrypt subsequent application traffic.
 
 Provision directly; do not create a PHC hash just to convert it:
 
@@ -46,6 +46,20 @@ hostile server from requesting a cheaply guessable password proof. For a trusted
 deployment with a different profile, pass `WithMinArgonCost(iterations, memoryKiB)`
 to `NewScramClient`. Choose this policy locally; never copy it from a challenge.
 Invalid minimum configuration is rejected by `StartAuthentication`.
+
+### Channel binding
+
+Pass `WithChannelBinding(data)` to both `ProcessServerFirstMessage` (client) and
+`ProcessClientFinalMessage` (server) to commit the proof to the transport. Both
+peers must derive identical bytes, e.g. SHA-256 of the server's leaf certificate
+DER (RFC 5929 style, stable across pooled connections) or an RFC 9266 TLS
+exporter (per connection). A relay that terminates TLS with any other
+certificate, even one your CA trusts, then fails the proof, so it can neither
+complete the login nor obtain a token issued with it. Bound and unbound peers
+never agree, so there is no silent downgrade; an empty or oversized (>64 bytes)
+binding returns `ErrSCRAMChannelBinding`. A mismatch is reported as
+`ErrInvalidCredentials`, like a wrong password. When later requests travel on
+new connections (HTTP), the client must also pin the bound certificate on them.
 
 Check every error and abort the exchange on failure. Only a successful **server
 final** authenticates a user; use its `Username`, never a separate identity from
@@ -169,6 +183,7 @@ session storage when needed. `AddToken` ignores invalid lengths for API stabilit
 | Password | 1024 bytes at every KDF entry |
 | SCRAM username | 1–256 UTF-8 bytes; no control characters, comma, or equals |
 | Client nonce / combined nonce | 256 / 512 printable ASCII bytes; no comma |
+| SCRAM channel binding | 1–64 bytes |
 | SCRAM salt / key / proof | 16–64 / 32 / 32 decoded bytes |
 | PHC record / salt / digest | 256 encoded / 8–64 / 16–64 decoded bytes |
 | Argon2 execution | memory ≤256 MiB, iterations ≤16, lanes ≤16, memory ≥8×lanes KiB |
