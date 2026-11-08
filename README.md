@@ -89,7 +89,10 @@ registration, logging, and rate limits must not disclose account existence.
 `AddCredential` validates and copies its input; check the returned error.
 Replacement and `RemoveCredential(username)` invalidate pending handshakes for
 that user. They do not revoke already issued JWTs or application sessions.
-`Stop` discards pending handshakes and rejects further authentication.
+`Abandon(fullNonce)` frees one handshake whose client went away after the
+challenge, so a dropped connection does not hold its slot for the handshake
+timeout; call it instead of running the proof step with an empty proof. `Stop`
+discards pending handshakes and rejects further authentication.
 
 ## Password hashing and migration
 
@@ -123,7 +126,7 @@ Create one manager per key and service policy, then reuse it concurrently:
 ```go
 manager, err := auth.NewJWT(secret, // at least 32 cryptographically random bytes
     auth.WithIssuer("lixen-auth"),
-    auth.WithAudience([]string{"vi-fighter"}),
+    auth.WithAudience([]string{"vif"}),
     auth.WithTokenLifetime(15*time.Minute),
     auth.WithLeeway(0))
 if err != nil {
@@ -145,7 +148,7 @@ when present, pins the signing algorithm, and enforces configured issuer and
 Use `errors.Is` with package errors. `ErrTokenMissingClaim` covers missing or
 mismatched issuer/audience; `ErrTokenNotYetValid` also covers future `iat`.
 
-For logwisp and vi-fighter, use distinct audiences and verify them at each
+For logwisp and vif, use distinct audiences and verify them at each
 service; use separate keys where trust differs. With HS256, every verifier can
 mint tokens. For separate signing and verification trust, use
 `NewJWTRSA(privateKey)` and `NewJWTVerifier(publicKey)` with the same claim policy.
@@ -219,4 +222,4 @@ done
 
 CI runs race tests, vet, and short fuzz campaigns. Fuzz KDF paths use bounded test
 costs; deterministic tests cover production limits without allocating at those
-limits. See [the audit report](doc/security-audit.md) for findings and scope.
+limits.

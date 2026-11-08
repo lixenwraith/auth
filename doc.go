@@ -15,6 +15,6 @@
 // issuer and audience for each service. ValidateToken requires expiration and a
 // nonempty subject; it returns only the nested "extra" application claims.
 //
-// See the README and doc/security-audit.md for limits, migration, transport
-// requirements, persistence, and deployment guidance.
+// See the README for limits, migration, transport requirements, persistence, and
+// deployment guidance.
 package auth
