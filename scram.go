@@ -573,6 +573,17 @@ func (s *ScramServer) AddCredential(cred *Credential) error {
 	return nil
 }
 
+// Abandon frees a handshake whose client went away after the challenge, so an
+// exchange nobody will finish is not held for ScramHandshakeTimeout. A handshake
+// whose proof is being verified is left to its verifier; an unknown nonce is a no-op.
+func (s *ScramServer) Abandon(fullNonce string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state, ok := s.handshakes[fullNonce]; ok && state.verifying.Load() == 0 {
+		delete(s.handshakes, fullNonce)
+	}
+}
+
 // RemoveCredential revokes future authentication and all pending handshakes.
 // Already issued application sessions/tokens must be revoked by the application.
 func (s *ScramServer) RemoveCredential(username string) {

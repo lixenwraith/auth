@@ -802,3 +802,27 @@ func BenchmarkScramHandshake(b *testing.B) {
 		}
 	}
 }
+
+func TestScramAbandonFreesTheHandshake(t *testing.T) {
+	s, user, pw, _ := setupScram(t)
+	final := startHandshake(t, s, user, pw)
+	eq(t, handshakeCount(s), 1, "pending before abandon")
+	s.Abandon(final.FullNonce)
+	eq(t, handshakeCount(s), 0, "abandon frees the handshake")
+	_, err := s.ProcessClientFinalMessage(final.FullNonce, final.ClientProof)
+	errIs(t, err, ErrSCRAMInvalidNonce, "an abandoned proof is refused")
+	s.Abandon("never-issued")
+	eq(t, handshakeCount(s), 0, "an unknown nonce is a no-op")
+
+	// A handshake under verification stays for its verifier.
+	final = startHandshake(t, s, user, pw)
+	s.mu.RLock()
+	state := s.handshakes[final.FullNonce]
+	s.mu.RUnlock()
+	state.verifying.Store(1)
+	s.Abandon(final.FullNonce)
+	eq(t, handshakeCount(s), 1, "a verifying handshake is kept")
+	state.verifying.Store(0)
+	_, err = s.ProcessClientFinalMessage(final.FullNonce, final.ClientProof)
+	noErr(t, err, "the kept handshake completes")
+}
