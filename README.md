@@ -197,7 +197,7 @@ session storage when needed. `AddToken` ignores invalid lengths for API stabilit
 | Argon2 execution | memory ≤256 MiB, iterations ≤16, lanes ≤16, memory ≥8×lanes KiB |
 | SCRAM client minimum | 64 MiB and 3 iterations by default; trusted local policy can override |
 | Argon2 combined work | memory×iterations ≤786432 KiB-passes (4×default) |
-| Pending server handshakes | 4096, with a 30-second timeout |
+| Pending server handshakes | 4096, with a 30-second timeout; a full table drops its oldest |
 | JWT / opaque token | 16 KiB |
 
 These are per-operation ceilings, not aggregate memory/CPU quotas. Set transport
