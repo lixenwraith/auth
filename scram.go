@@ -372,14 +372,21 @@ func (s *ScramServer) cleanupExpiredHandshakes() {
 	s.evictExpiredLocked()
 }
 
-// evictExpiredLocked removes timed-out handshakes. Caller holds s.mu.
-func (s *ScramServer) evictExpiredLocked() {
+// evictExpiredLocked removes timed-out handshakes and returns the oldest one
+// left that is not being verified, if any. Caller holds s.mu.
+func (s *ScramServer) evictExpiredLocked() (oldest *HandshakeState) {
 	cutoff := time.Now().Add(-ScramHandshakeTimeout)
 	for nonce, state := range s.handshakes {
-		if state.CreatedAt.Before(cutoff) && state.verifying.Load() == 0 {
+		if state.verifying.Load() != 0 {
+			continue
+		}
+		if state.CreatedAt.Before(cutoff) {
 			delete(s.handshakes, nonce)
+		} else if oldest == nil || state.CreatedAt.Before(oldest.CreatedAt) {
+			oldest = state
 		}
 	}
+	return oldest
 }
 
 // ProcessClientFirstMessage processes initial auth request
@@ -390,9 +397,11 @@ func (s *ScramServer) evictExpiredLocked() {
 // the wrong-password path. Callers must not treat a successful return as
 // evidence that the account exists, and must not log it as an auth success.
 //
-// ErrSCRAMTooManyHandshakes is returned when the in-flight handshake cap is
-// reached; the cap is applied before credential lookup so the rejection path is
-// identical for known and unknown users.
+// At the in-flight handshake cap the oldest handshake not being verified is
+// dropped, so challenges nobody answers cannot shut new logins out; its client
+// then fails with ErrSCRAMInvalidNonce. ErrSCRAMTooManyHandshakes is returned
+// only when every handshake is being verified. The cap is applied before the
+// credential lookup, so known and unknown users fare alike.
 func (s *ScramServer) ProcessClientFirstMessage(username, clientNonce string) (ServerFirstMessage, error) {
 	if err := validateUsername(username); err != nil {
 		return ServerFirstMessage{}, err
@@ -407,12 +416,14 @@ func (s *ScramServer) ProcessClientFirstMessage(username, clientNonce string) (S
 		return ServerFirstMessage{}, ErrSCRAMStopped
 	}
 
-	// opportunistic sweep, then hard cap. Applied before the credential
-	// lookup so the rejection path is identical for known and unknown users.
+	// opportunistic sweep, then the cap: a full table drops its oldest
 	if len(s.handshakes) >= ScramMaxHandshakes {
-		s.evictExpiredLocked()
+		oldest := s.evictExpiredLocked()
 		if len(s.handshakes) >= ScramMaxHandshakes {
-			return ServerFirstMessage{}, ErrSCRAMTooManyHandshakes
+			if oldest == nil {
+				return ServerFirstMessage{}, ErrSCRAMTooManyHandshakes
+			}
+			delete(s.handshakes, oldest.FullNonce)
 		}
 	}
 

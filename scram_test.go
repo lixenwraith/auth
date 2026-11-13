@@ -388,27 +388,45 @@ func TestScramCleanup(t *testing.T) {
 	eq(t, handshakeCount(s), 2, "verifying handshakes must not be evicted")
 }
 
-func TestScramHandshakeCap(t *testing.T) {
+// A full handshake table drops its oldest open handshake, so challenges nobody
+// answers cannot shut new logins out; known and unknown users fare alike, and
+// only a table whose every handshake is being verified refuses.
+func TestScramFullTableDropsItsOldestHandshake(t *testing.T) {
 	s, user, _, _ := setupScram(t)
+	var first string
 	for i := range ScramMaxHandshakes {
-		_, err := s.ProcessClientFirstMessage(user, fmt.Sprintf("n-%d", i))
+		msg, err := s.ProcessClientFirstMessage(user, fmt.Sprintf("n-%d", i))
 		noErr(t, err, "first message")
+		if i == 0 {
+			first = msg.FullNonce
+		}
 	}
-	eq(t, handshakeCount(s), ScramMaxHandshakes, "at capacity")
+	s.mu.Lock()
+	s.handshakes[first].CreatedAt = time.Now().Add(-time.Second) // oldest despite clock ties
+	s.mu.Unlock()
 
 	_, err := s.ProcessClientFirstMessage(user, "overflow")
-	errIs(t, err, ErrSCRAMTooManyHandshakes, "known user at capacity")
-
-	// the cap precedes credential lookup, so it is not an enumeration oracle
+	noErr(t, err, "known user at capacity")
+	eq(t, handshakeCount(s), ScramMaxHandshakes, "one in, one out")
+	_, err = s.ProcessClientFinalMessage(first, "proof")
+	errIs(t, err, ErrSCRAMInvalidNonce, "oldest dropped")
 	_, err = s.ProcessClientFirstMessage("ghost", "overflow")
-	errIs(t, err, ErrSCRAMTooManyHandshakes, "unknown user at capacity")
+	noErr(t, err, "unknown user at capacity")
+
+	s.mu.Lock()
+	for _, state := range s.handshakes {
+		state.verifying.Store(1)
+	}
+	s.mu.Unlock()
+	_, err = s.ProcessClientFirstMessage(user, "verifying")
+	errIs(t, err, ErrSCRAMTooManyHandshakes, "every handshake being verified")
 
 	s.mu.Lock()
 	for _, state := range s.handshakes {
 		state.CreatedAt = time.Now().Add(-2 * ScramHandshakeTimeout)
+		state.verifying.Store(0)
 	}
 	s.mu.Unlock()
-
 	_, err = s.ProcessClientFirstMessage(user, "after-sweep")
 	noErr(t, err, "capacity reclaimed by the opportunistic sweep")
 	eq(t, handshakeCount(s), 1, "all expired slots reclaimed")
